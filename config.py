@@ -5,8 +5,7 @@ ROOT = Path(__file__).resolve().parent
 IN_DIR = ROOT / "in"
 DATA_DIR = ROOT / "data"
 OUT_DIR = ROOT / "out"
-DB_PATH = DATA_DIR / "act181.db"
-PARQUET_DIR = DATA_DIR
+DB_PATH = DATA_DIR / "act181.duckdb"
 
 SQ_M_PER_SQ_MI = 2589988.110336
 GEOD = Geod(ellps="WGS84")
@@ -286,62 +285,20 @@ WINDHAM_TOWNS = {
     "Wilmington", "Windham", "Winhall",
 }
 
-FLU_CREATE_SQL = """
-CREATE TABLE IF NOT EXISTS flu_areas (
-    id TEXT PRIMARY KEY,
-    geometry BLOB,
-    flu_code TEXT,
-    name TEXT,
-    rpc TEXT,
-    version TEXT,
-    submitter TEXT,
-    geoid TEXT,
-    desig_center_step INTEGER,
-    desig_type TEXT,
-    lurb_status TEXT,
-    date_rpc TEXT,
-    date_lurb TEXT,
-    date_agg TEXT,
-    notes TEXT,
-    lu_auth TEXT,
-    source_layer TEXT,
-    source_oid INTEGER
-)
-"""
-
-TIER_CREATE_SQL = """
-CREATE TABLE IF NOT EXISTS tier_areas (
-    id TEXT PRIMARY KEY,
-    geometry BLOB,
-    tier_code TEXT,
-    rpc TEXT,
-    version TEXT,
-    submitter TEXT,
-    geoid TEXT,
-    lurb_status TEXT,
-    date_subm TEXT,
-    date_lurb TEXT,
-    date_agg TEXT,
-    notes TEXT,
-    source_layer TEXT,
-    source_oid INTEGER
-)
-"""
-
-BOUNDARY_COLUMNS = [
-    "id", "geometry", "boundary_type", "name", "geoid",
-    "rpc_code", "source_layer", "source_oid",
+FLU_COLUMNS = [
+    "id", "geom", "flu_code", "name", "rpc", "version",
+    "submitter", "geoid", "desig_center_step", "desig_type",
+    "lurb_status", "date_rpc", "date_lurb", "date_agg", "notes",
+    "lu_auth", "source_layer", "source_oid",
 ]
 
-BOUNDARY_CREATE_SQL = """
-CREATE TABLE IF NOT EXISTS boundary_areas (
-    id TEXT PRIMARY KEY,
-    geometry BLOB,
-    boundary_type TEXT,
-    name TEXT,
-    geoid TEXT,
-    rpc_code TEXT,
-    source_layer TEXT,
-    source_oid INTEGER
-)
-"""
+TIER_COLUMNS = [
+    "id", "geom", "tier_code", "rpc", "version",
+    "submitter", "geoid", "lurb_status", "date_subm",
+    "date_lurb", "date_agg", "notes", "source_layer", "source_oid",
+]
+
+BOUNDARY_COLUMNS = [
+    "id", "geom", "boundary_type", "name", "geoid",
+    "rpc_code", "source_layer", "source_oid",
+]

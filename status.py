@@ -1,33 +1,34 @@
-import sqlite3
+import duckdb
 import config
 
 FLU_GROWTH_CODES = list(config.GROWTH_CODES)
 
 
 def main():
-    conn = sqlite3.connect(str(config.DB_PATH))
+    duck = duckdb.connect(str(config.DB_PATH), read_only=True)
+    duck.execute("LOAD spatial;")
 
     flu_by_rpc = {}
-    for row in conn.execute(
+    for row in duck.execute(
         "SELECT rpc, version, COUNT(*) FROM flu_areas WHERE rpc IS NOT NULL AND rpc != '' GROUP BY rpc, version ORDER BY rpc, version"
-    ):
+    ).fetchall():
         rpc, version, count = row
-        flu_by_rpc.setdefault(rpc, {})[version] = count
+        flu_by_rpc.setdefault(rpc, {})[version or "?"] = count
 
     flu_growth_by_rpc = {}
-    for row in conn.execute(
+    for row in duck.execute(
         "SELECT rpc, version, COUNT(*) FROM flu_areas WHERE rpc IS NOT NULL AND rpc != '' AND flu_code IN ("
         + ",".join("?" for _ in FLU_GROWTH_CODES)
         + ") GROUP BY rpc, version ORDER BY rpc, version",
         FLU_GROWTH_CODES,
-    ):
+    ).fetchall():
         rpc, version, count = row
-        flu_growth_by_rpc.setdefault(rpc, {})[version] = count
+        flu_growth_by_rpc.setdefault(rpc, {})[version or "?"] = count
 
     tier_by_rpc = {}
-    for row in conn.execute(
+    for row in duck.execute(
         "SELECT rpc, version, COUNT(*) FROM tier_areas WHERE rpc IS NOT NULL AND rpc != '' AND tier_code = '1B' GROUP BY rpc, version ORDER BY rpc, version"
-    ):
+    ).fetchall():
         rpc, version, count = row
         key = "PRE" if version == "PRE" else "APP" if version == "APP" else "?"
         tier_by_rpc.setdefault(rpc, {})[key] = count
@@ -64,9 +65,9 @@ def main():
     print(f"  Boundary data")
     print(f"  {'─' * 52}")
     boundary_counts = {}
-    for row in conn.execute(
+    for row in duck.execute(
         "SELECT boundary_type, COUNT(*) FROM boundary_areas GROUP BY boundary_type ORDER BY boundary_type"
-    ):
+    ).fetchall():
         bt, cnt = row
         boundary_counts[bt] = cnt
     plural = {"town": "towns", "county": "counties", "rpc": "rpcs"}
@@ -75,20 +76,23 @@ def main():
         print(f"  {plural[bt]:<12} {cnt} features")
 
     print()
-    print(f"  Parquet files")
+    print(f"  Database")
     print(f"  {'─' * 52}")
-    import duckdb
-    duck = duckdb.connect()
-    duck.execute("LOAD spatial;")
-    for fname in ["flu_areas", "tier_areas", "boundary_towns", "boundary_counties", "boundary_rpcs"]:
-        path = config.PARQUET_DIR / f"{fname}.parquet"
-        if path.exists():
-            cnt = duck.execute(f"SELECT COUNT(*) FROM '{path}'").fetchone()[0]
-            size = path.stat().st_size
-            print(f"  {fname:<20} {cnt:>5} rows  {size // 1024:>5} KB")
-    duck.close()
+    db_size = config.DB_PATH.stat().st_size / (1024 * 1024)
+    print(f"  {config.DB_PATH.name:<20} {db_size:.0f} MB")
 
-    conn.close()
+    for table in ["flu_areas", "tier_areas", "boundary_areas"]:
+        cnt = duck.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+        print(f"  {table:<20} {cnt:>5} rows")
+
+    for table in ["rpc_growth_union", "rpc_tier_union", "overlay_results", "rpc_stats_data", "flu_tier_data"]:
+        try:
+            cnt = duck.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            print(f"  {table:<20} {cnt:>5} rows (materialized)")
+        except Exception:
+            pass
+
+    duck.close()
 
 
 if __name__ == "__main__":

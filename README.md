@@ -7,17 +7,21 @@ Analyzes the spatial overlap between Act 181 growth areas (Downtown Center, Vill
 ```
 ArcGIS feature services ──→ extract.py ──→ in/*.geojson
                                        (raw schema, one per source)
-in/*.geojson ──→ transform.py ──→ data/*.{db,parquet}
-                           (field mapping, Windham repair,
+in/*.geojson ──→ transform.py ──→ data/act181.duckdb
+                           (bulk JSON ingestion via DuckDB,
+                            field mapping, Windham repair,
                             version/RPC normalization,
                             FLU-shaped tier sources → tier_code="1B",
                             geometry validation,
-                            Parquet via DuckDB spatial)
-data/*.parquet ──→ analyze.py ──→ out/
-                            (growth_tier_overlay.geojson
-                             with per-RPC features,
-                             index.html with Leaflet map
-                             + boundary reference layers)
+                            R-tree indexes, materialized aggregates
+                            and pre-intersected analysis results)
+data/act181.duckdb ──→ analyze.py ──→ out/
+                              (reads pre-materialized tables,
+                               geodesic area via pyproj,
+                               growth_tier_overlay.geojson
+                               with per-RPC features,
+                               index.html with Leaflet map
+                               + boundary reference layers)
 ```
 
 ## Quick start
@@ -63,12 +67,48 @@ Sources with `_pre` suffix are per-RPC pre-application services that haven't bee
 
 ## Storage format
 
-All datasets are stored in two formats:
+Everything lives in a single DuckDB database: `data/act181.duckdb`.
 
-- **SQLite** (`data/act181.db`) — the original storage format, still written for backward compatibility
-- **GeoParquet** (`data/*.parquet`) — geometry stored as DuckDB GEOMETRY type via the spatial extension, columnar format for fast I/O
+The transform step reads GeoJSON features, writes them to temporary JSON files, and bulk-loads them into DuckDB using `read_json_auto` + `ST_GeomFromGeoJSON` in a single `INSERT...SELECT` per source. This avoids the memory leak that occurs with repeated `executemany` calls to `ST_GeomFromGeoJSON`.
 
-The analyze step reads from Parquet via DuckDB, computing per-RPC spatial overlays in a single SQL query with `GROUP BY rpc` and `ST_Intersection` / `ST_Difference` — all in C-level GEOS, only extracting the result geometries into Python for GeoJSON serialization.
+All geometry columns use DuckDB's native `GEOMETRY` type (not the CRS-annotated variant), which enables R-tree spatial indexes. The spatial extension is loaded at runtime via `LOAD spatial;`.
+
+### Raw tables
+
+Three tables hold the ingested data, with R-tree indexes on their geometry columns:
+
+- **`flu_areas`** — ~9,650 rows. Growth land use areas across 10 RPCs.
+- **`tier_areas`** — ~860 rows. Tier 1B designations across 9 RPCs.
+- **`boundary_areas`** — 281 rows. Town, county, and RPC boundaries from VCGI BNDHASH.
+
+### Materialized aggregation tables
+
+Pre-computed geometry unions, created once during transform:
+
+| Table | Rows | Content |
+|---|---|---|
+| `rpc_growth_union` | 10 | Per-RPC union of growth areas (DC/VC/VA/PGA) |
+| `rpc_tier_union` | ~15 | Per-RPC, per-version union of Tier 1B areas |
+| `rpc_tier_any` | ~10 | Per-RPC union of all Tier 1B regardless of version |
+| `statewide_growth` | 1 | Union of all growth areas statewide |
+| `statewide_tier` | 1 | Union of all Tier 1B statewide |
+| `statewide_pre` | 1 | Union of pre-app Tier 1B statewide |
+| `statewide_app` | 1 | Union of final-app Tier 1B statewide |
+| `flu_code_unions` | 4 | Statewide union per FLU code (DC/VC/VA/PGA) |
+
+### Pre-intersected result tables
+
+Analysis results computed once during transform, read in bulk by analyze.py:
+
+| Table | Rows | Content |
+|---|---|---|
+| `overlay_results` | 10 | Per-RPC growth split into app-overlap, pre-overlap, and no-tier |
+| `rpc_stats_data` | 11 | Each RPC boundary intersected with growth/pre/app statewide unions |
+| `flu_tier_data` | 5 | Each FLU code + ALL intersected with tier union |
+
+### Why materialize upfront
+
+The expensive spatial operations — `ST_Union_Agg` over thousands of polygons, `ST_Intersection` of statewide unions against RPC boundaries — run once during transform (~20s) instead of on every analyze run. This makes analyze nearly instant (~1.5s) and keeps ad-hoc queries fast against the pre-computed tables.
 
 ## Normalized schemas
 
@@ -121,7 +161,7 @@ All tables store geometry with a `source_layer` + `source_oid` provenance chain 
 |---|---|
 | `make` | extract → transform → analyze → status |
 | `make extract` | Download fresh data from ArcGIS (skips cached files) |
-| `make transform` | Normalize all sources into `data/act181.db` + `data/*.parquet` |
+| `make transform` | Ingest, validate, index, and materialize into `data/act181.duckdb` |
 | `make analyze` | Generate overlay GeoJSON + Leaflet map (uses DuckDB spatial) |
 | `make status` | Coverage table per RPC |
 | `make clean` | Remove all generated artifacts |
@@ -191,6 +231,60 @@ make status
 
 Check the status table to confirm the new RPC's data appears in the right columns.
 
+## Querying the database
+
+The DuckDB database is self-contained and queryable interactively. The spatial extension loads automatically on connect.
+
+```bash
+duckdb data/act181.duckdb
+```
+
+### Ad-hoc spatial queries
+
+The raw tables have R-tree indexes on their geometry columns, so spatial joins and filters are fast even without pre-materialization:
+
+```sql
+-- Growth areas that intersect Tier 1B in Chittenden County
+SELECT f.id, f.flu_code, t.tier_code, t.version
+FROM flu_areas f, tier_areas t
+WHERE ST_Intersects(f.geom, t.geom)
+  AND f.rpc = 'CC' AND f.flu_code = 'DC';
+
+-- Growth areas within ~100m of any Tier 1B boundary
+SELECT f.id, f.flu_code, f.rpc
+FROM flu_areas f, tier_areas t
+WHERE ST_DWithin(f.geom, t.geom, 0.001)
+  AND f.flu_code IN ('DC','VC','VA','PGA');
+
+-- How much growth area is within 500m of Tier 1B in a specific RPC?
+SELECT SUM(ST_Area_Spheroid(ST_Intersection(f.geom, ST_Buffer(t.geom, 0.005)))) / 2589988.11
+  AS growth_near_tier_sq_mi
+FROM flu_areas f, tier_areas t
+WHERE f.flu_code IN ('DC','VC','VA','PGA')
+  AND f.rpc = 'CC' AND t.tier_code = '1B';
+```
+
+### Pre-materialized tables
+
+For queries that match the pre-computed analysis, the materialized tables return instantly:
+
+```sql
+-- Full overlay results per RPC
+SELECT rpc, ST_AsGeoJSON(growth_geom) FROM overlay_results;
+
+-- RPC-level area statistics
+SELECT name, rpc_code, ST_Area_Spheroid(growth_geom) / 2589988.11 AS growth_sq_mi
+FROM rpc_stats_data;
+
+-- FLU code breakdown
+SELECT flu_code, ST_Area_Spheroid(overlap_geom) / 2589988.11 AS tier_sq_mi
+FROM flu_tier_data;
+```
+
+### Note on area calculations
+
+DuckDB's `ST_Area_Spheroid` returns incorrect values at Vermont latitudes (~41% of the true geodesic area). The analyze step uses pyproj's Karney geodesic algorithm for accurate area calculations. For ad-hoc queries where relative comparisons suffice, `ST_Area_Spheroid` still works — the error is consistent across features. For accurate absolute areas, extract the geometry as GeoJSON and compute with pyproj.
+
 ## Dependencies
 
-Python ≥3.9, `shapely`, `pyproj`, `duckdb`. Managed via `uv` — `duckdb` has a pure-Python wheel with no system requirements. The spatial extension is loaded at runtime via DuckDB's extension mechanism (`INSTALL spatial; LOAD spatial;`), no host-side install needed.
+Python ≥3.9, `pyproj`, `duckdb`. Managed via `uv` — `duckdb` has a pure-Python wheel with no system requirements. The spatial extension is loaded at runtime via DuckDB's extension mechanism (`INSTALL spatial; LOAD spatial;`), no host-side install needed.

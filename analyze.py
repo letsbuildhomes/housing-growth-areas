@@ -1,6 +1,4 @@
 import json
-import sqlite3
-from pathlib import Path
 
 import duckdb
 
@@ -40,65 +38,18 @@ def geodesic_sq_miles(geom_dict):
     return total_m2 / config.SQ_M_PER_SQ_MI
 
 
-def build_overlay():
-    duck = duckdb.connect()
-    duck.execute("LOAD spatial;")
-
-    results = duck.execute("""
-        WITH rpc_growth AS (
-            SELECT rpc, ST_Union_Agg(geometry) AS geom
-            FROM 'data/flu_areas.parquet'
-            WHERE flu_code IN ('DC','VC','VA','PGA') AND rpc IS NOT NULL AND rpc != ''
-            GROUP BY rpc
-        ),
-        rpc_tier AS (
-            SELECT rpc, version, ST_Union_Agg(geometry) AS geom
-            FROM 'data/tier_areas.parquet'
-            WHERE tier_code = '1B' AND rpc IS NOT NULL AND rpc != ''
-            GROUP BY rpc, version
-        ),
-        rpc_tier_any AS (
-            SELECT rpc, ST_Union_Agg(geom) AS geom FROM rpc_tier GROUP BY rpc
-        ),
-        rpc_app_overlap AS (
-            SELECT g.rpc, ST_Intersection(g.geom, a.geom) AS geom
-            FROM rpc_growth g
-            JOIN rpc_tier a ON a.rpc = g.rpc AND a.version = 'APP'
-        ),
-        rpc_pre_overlap AS (
-            SELECT g.rpc,
-                CASE WHEN a.rpc IS NOT NULL
-                    THEN ST_Difference(ST_Intersection(g.geom, p.geom), a.geom)
-                    ELSE ST_Intersection(g.geom, p.geom)
-                END AS geom
-            FROM rpc_growth g
-            JOIN rpc_tier p ON p.rpc = g.rpc AND p.version = 'PRE'
-            LEFT JOIN rpc_tier a ON a.rpc = g.rpc AND a.version = 'APP'
-        ),
-        rpc_no_tier AS (
-            SELECT g.rpc,
-                ST_Difference(g.geom, COALESCE(ta.geom, ST_GeomFromText('MULTIPOLYGON EMPTY'))) AS geom
-            FROM rpc_growth g LEFT JOIN rpc_tier_any ta ON ta.rpc = g.rpc
-        )
-        SELECT
-            g.rpc,
-            ST_AsGeoJSON(g.geom) AS growth_json,
-            ST_AsGeoJSON(ao.geom) AS app_overlap_json,
-            ST_AsGeoJSON(po.geom) AS pre_overlap_json,
-            ST_AsGeoJSON(no.geom) AS no_tier_json
-        FROM rpc_growth g
-        LEFT JOIN rpc_app_overlap ao ON ao.rpc = g.rpc
-        LEFT JOIN rpc_pre_overlap po ON po.rpc = g.rpc
-        LEFT JOIN rpc_no_tier no ON no.rpc = g.rpc
+def build_overlay(duck):
+    rows = duck.execute("""
+        SELECT rpc, ST_AsGeoJSON(growth_geom), ST_AsGeoJSON(app_overlap_geom),
+               ST_AsGeoJSON(pre_overlap_geom), ST_AsGeoJSON(no_tier_geom)
+        FROM overlay_results
     """).fetchall()
-
-    duck.close()
 
     features = []
     total_growth_sq_mi = 0.0
     tier1b_growth_sq_mi = 0.0
 
-    for row in results:
+    for row in rows:
         rpc_code, growth_json, app_json, pre_json, no_tier_json = row
 
         growth_dict = json.loads(growth_json) if growth_json else None
@@ -147,17 +98,19 @@ def build_overlay():
 
     tier1b_growth_pct = (tier1b_growth_sq_mi / total_growth_sq_mi * 100) if total_growth_sq_mi else 0.0
 
-    conn = sqlite3.connect(str(config.DB_PATH))
     growth_counts = {}
-    for row in conn.execute("SELECT flu_code, COUNT(*) FROM flu_areas WHERE flu_code IN ("
-                             + ",".join("?" for _ in config.GROWTH_CODES)
-                             + ") GROUP BY flu_code", list(config.GROWTH_CODES)):
+    for row in duck.execute(
+        "SELECT flu_code, COUNT(*) FROM flu_areas WHERE flu_code IN ("
+        + ",".join("?" for _ in config.GROWTH_CODES)
+        + ") GROUP BY flu_code", list(config.GROWTH_CODES)
+    ).fetchall():
         growth_counts[row[0]] = row[1]
 
     tier_counts = {}
-    for row in conn.execute("SELECT version, COUNT(*) FROM tier_areas WHERE tier_code='1B' GROUP BY version"):
+    for row in duck.execute(
+        "SELECT version, COUNT(*) FROM tier_areas WHERE tier_code = '1B' GROUP BY version"
+    ).fetchall():
         tier_counts[row[0] or "OTHER"] = row[1]
-    conn.close()
 
     fc = {
         "type": "FeatureCollection",
@@ -175,18 +128,15 @@ def build_overlay():
             "processing_note": "Per-RPC overlay computed in WGS84 coordinates for map visualization.",
         },
     }
-
     return fc
 
 
-def load_boundary_layer(parquet_path, label, style):
-    duck = duckdb.connect()
-    duck.execute("LOAD spatial;")
-    rows = duck.execute(f"""
-        SELECT name, geoid, source_layer, ST_AsGeoJSON(ST_Force2D(geometry)) AS geojson
-        FROM '{parquet_path}'
-    """).fetchall()
-    duck.close()
+def load_boundary_layer(duck, boundary_type, label, style):
+    rows = duck.execute("""
+        SELECT name, geoid, source_layer, ST_AsGeoJSON(ST_Force2D(geom)) AS geojson
+        FROM boundary_areas
+        WHERE boundary_type = ?
+    """, [boundary_type]).fetchall()
 
     features = []
     for name, geoid, source_layer, geojson_str in rows:
@@ -211,54 +161,23 @@ def load_boundary_layer(parquet_path, label, style):
     }
 
 
-def write_overlay(fc, path):
-    path.write_text(json.dumps(fc, separators=(",", ":")))
-    print(f"wrote {path}")
-    meta = fc.get("metadata", {})
-    print(json.dumps(meta.get("area_stats", {}), indent=2))
-
-
-def write_boundary_layer(layer, path):
-    path.write_text(json.dumps(layer, separators=(",", ":")))
-    print(f"wrote {path}  ({len(layer['features'])} features)")
-
-
-def build_rpc_stats():
-    duck = duckdb.connect()
-    duck.execute("LOAD spatial;")
-
+def build_rpc_stats(duck):
     rows = duck.execute("""
-        WITH growth_union AS (
-            SELECT COALESCE(ST_Union_Agg(geometry), ST_GeomFromText('GEOMETRYCOLLECTION EMPTY')) AS geom
-            FROM 'data/flu_areas.parquet' WHERE flu_code IN ('DC','VC','VA','PGA')
-        ),
-        pre_union AS (
-            SELECT COALESCE(ST_Union_Agg(geometry), ST_GeomFromText('GEOMETRYCOLLECTION EMPTY')) AS geom
-            FROM 'data/tier_areas.parquet' WHERE tier_code='1B' AND version='PRE'
-        ),
-        app_union AS (
-            SELECT COALESCE(ST_Union_Agg(geometry), ST_GeomFromText('GEOMETRYCOLLECTION EMPTY')) AS geom
-            FROM 'data/tier_areas.parquet' WHERE tier_code='1B' AND version='APP'
-        )
-        SELECT r.name, r.rpc_code AS c,
-            ST_AsGeoJSON(r.geometry) AS rpc_geom,
-            ST_AsGeoJSON(ST_Intersection(r.geometry, g.geom)) AS growth_geom,
-            ST_AsGeoJSON(ST_Intersection(r.geometry, p.geom)) AS pre_geom,
-            ST_AsGeoJSON(ST_Intersection(r.geometry, a.geom)) AS app_geom
-        FROM 'data/boundary_rpcs.parquet' r, growth_union g, pre_union p, app_union a
+        SELECT name, rpc_code,
+               ST_AsGeoJSON(rpc_geom), ST_AsGeoJSON(growth_geom),
+               ST_AsGeoJSON(pre_geom), ST_AsGeoJSON(app_geom)
+        FROM rpc_stats_data
     """).fetchall()
 
     has_growth = {r[0] for r in duck.execute(
-        "SELECT DISTINCT rpc FROM 'data/flu_areas.parquet' WHERE flu_code IN ('DC','VC','VA','PGA') AND rpc IS NOT NULL AND rpc != ''"
+        "SELECT DISTINCT rpc FROM flu_areas WHERE flu_code IN ('DC','VC','VA','PGA') AND rpc IS NOT NULL AND rpc != ''"
     ).fetchall()}
     has_pre = {r[0] for r in duck.execute(
-        "SELECT DISTINCT rpc FROM 'data/tier_areas.parquet' WHERE tier_code='1B' AND version='PRE'"
+        "SELECT DISTINCT rpc FROM tier_areas WHERE tier_code = '1B' AND version = 'PRE'"
     ).fetchall()}
     has_app = {r[0] for r in duck.execute(
-        "SELECT DISTINCT rpc FROM 'data/tier_areas.parquet' WHERE tier_code='1B' AND version='APP'"
+        "SELECT DISTINCT rpc FROM tier_areas WHERE tier_code = '1B' AND version = 'APP'"
     ).fetchall()}
-
-    duck.close()
 
     results = []
     sums = [0.0, 0.0, 0.0, 0.0]
@@ -302,38 +221,11 @@ def build_rpc_stats():
     return results
 
 
-def build_flu_tier_stats():
-    duck = duckdb.connect()
-    duck.execute("LOAD spatial;")
-
+def build_flu_tier_stats(duck):
     rows = duck.execute("""
-        WITH flu_by_code AS (
-            SELECT flu_code, ST_Union_Agg(geometry) AS geom
-            FROM 'data/flu_areas.parquet'
-            WHERE flu_code IN ('DC','VC','VA','PGA')
-            GROUP BY flu_code
-        ),
-        all_flu AS (
-            SELECT ST_Union_Agg(geometry) AS geom
-            FROM 'data/flu_areas.parquet'
-            WHERE flu_code IN ('DC','VC','VA','PGA')
-        ),
-        tier_union AS (
-            SELECT COALESCE(ST_Union_Agg(geometry), ST_GeomFromText('GEOMETRYCOLLECTION EMPTY')) AS geom
-            FROM 'data/tier_areas.parquet' WHERE tier_code='1B'
-        )
-        SELECT f.flu_code,
-            ST_AsGeoJSON(f.geom) AS total_json,
-            ST_AsGeoJSON(COALESCE(ST_Intersection(f.geom, t.geom), ST_GeomFromText('GEOMETRYCOLLECTION EMPTY'))) AS overlap_json
-        FROM flu_by_code f, tier_union t
-        UNION ALL
-        SELECT 'ALL' AS flu_code,
-            ST_AsGeoJSON(a.geom) AS total_json,
-            ST_AsGeoJSON(COALESCE(ST_Intersection(a.geom, t.geom), ST_GeomFromText('GEOMETRYCOLLECTION EMPTY'))) AS overlap_json
-        FROM all_flu a, tier_union t
+        SELECT flu_code, ST_AsGeoJSON(total_geom), ST_AsGeoJSON(overlap_geom)
+        FROM flu_tier_data
     """).fetchall()
-
-    duck.close()
 
     results = []
     for code, total_json, overlap_json in rows:
@@ -554,7 +446,6 @@ LEAFLET_TEMPLATE = """<!doctype html>
     };
     legend.addTo(map);
 
-    // Boundary reference layers (on by default for RPCs and towns)
     const boundaryLayers = {};
     function addBoundaryLayer(fc, label, style, addToMap) {
       if (!fc || !fc.features || fc.features.length === 0) return null;
@@ -589,7 +480,6 @@ LEAFLET_TEMPLATE = """<!doctype html>
       L.control.layers(null, allLayers, { position: "topright" }).addTo(map);
     }
 
-    // Fullscreen control
     L.Control.Fullscreen = L.Control.extend({
       options: { position: "topleft" },
       onAdd: function() {
@@ -630,7 +520,6 @@ LEAFLET_TEMPLATE = """<!doctype html>
     document.getElementById("stat-tier-pct").textContent = fmtNumber(s.growth_with_any_tier1b_pct, 1) + "%";
     if (allBounds && allBounds.isValid()) map.fitBounds(allBounds, {padding:[18,18]});
 
-    // Render RPC stats table
     function pctCell(v) {
       if (v == null) return '<span class="blank">&mdash;</span>';
       return '<span class="num">' + fmtNumber(v, 1) + '%</span>';
@@ -649,13 +538,11 @@ LEAFLET_TEMPLATE = """<!doctype html>
           + '<td>' + pctCell(r.tier_app_pct) + '</td>'
           + '</tr>';
         if (r.code === "VT") {
-          // Last entry is statewide, goes to tfoot
         } else {
           html += row;
         }
       }
       tbody.innerHTML = html;
-      // Statewide row
       const sw = stats[stats.length - 1];
       tfoot.innerHTML = '<tr>'
         + '<td>' + esc(sw.name) + '</td>'
@@ -667,7 +554,6 @@ LEAFLET_TEMPLATE = """<!doctype html>
 
     renderRpcTable(rpcStats);
 
-    // Render FLU tier breakdown table
     function renderFluTierTable(stats) {
       const tbody = document.getElementById("flu-tier-tbody");
       const tfoot = document.getElementById("flu-tier-tfoot");
@@ -693,6 +579,18 @@ LEAFLET_TEMPLATE = """<!doctype html>
 </body>
 </html>
 """
+
+
+def write_overlay(fc, path):
+    path.write_text(json.dumps(fc, separators=(",", ":")))
+    print(f"wrote {path}")
+    meta = fc.get("metadata", {})
+    print(json.dumps(meta.get("area_stats", {}), indent=2))
+
+
+def write_boundary_layer(layer, path):
+    path.write_text(json.dumps(layer, separators=(",", ":")))
+    print(f"wrote {path}  ({len(layer['features'])} features)")
 
 
 def write_leaflet(geojson_path, html_path, towns_fc, counties_fc, rpcs_fc, rpc_stats, flu_tier_stats):
@@ -721,26 +619,22 @@ def write_leaflet(geojson_path, html_path, towns_fc, counties_fc, rpcs_fc, rpc_s
 def main():
     config.OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    overlay = build_overlay()
+    duck = duckdb.connect(str(config.DB_PATH), read_only=True)
+    duck.execute("LOAD spatial;")
 
-    towns_fc = load_boundary_layer(
-        str(config.PARQUET_DIR / "boundary_towns.parquet"),
-        "Towns",
-        {"color": "#888", "weight": 0.6, "opacity": 0.7, "fill": False},
-    )
-    counties_fc = load_boundary_layer(
-        str(config.PARQUET_DIR / "boundary_counties.parquet"),
-        "Counties",
-        {"color": "#444", "weight": 1.4, "opacity": 0.6, "fill": False},
-    )
-    rpcs_fc = load_boundary_layer(
-        str(config.PARQUET_DIR / "boundary_rpcs.parquet"),
-        "RPCs",
-        {"color": "#222", "weight": 2.2, "opacity": 0.5, "fill": False},
-    )
+    overlay = build_overlay(duck)
 
-    rpc_stats = build_rpc_stats()
-    flu_tier_stats = build_flu_tier_stats()
+    towns_fc = load_boundary_layer(duck, "town", "Towns",
+        {"color": "#888", "weight": 0.6, "opacity": 0.7, "fill": False})
+    counties_fc = load_boundary_layer(duck, "county", "Counties",
+        {"color": "#444", "weight": 1.4, "opacity": 0.6, "fill": False})
+    rpcs_fc = load_boundary_layer(duck, "rpc", "RPCs",
+        {"color": "#222", "weight": 2.2, "opacity": 0.5, "fill": False})
+
+    rpc_stats = build_rpc_stats(duck)
+    flu_tier_stats = build_flu_tier_stats(duck)
+
+    duck.close()
 
     overlay_path = config.OUT_DIR / "growth_tier_overlay.geojson"
     html_path = config.OUT_DIR / "index.html"
