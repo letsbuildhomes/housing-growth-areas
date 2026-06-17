@@ -1,96 +1,147 @@
-import html
 import json
 import sqlite3
 from pathlib import Path
-
-from shapely import from_wkb
-from shapely.geometry import GeometryCollection, MultiPolygon, mapping, shape
-from shapely.ops import unary_union
 
 import duckdb
 
 import config
 
 
-def polygonal_only(geom):
-    if geom.is_empty:
-        return geom
-    if geom.geom_type in ("Polygon", "MultiPolygon"):
-        return geom
-    if isinstance(geom, GeometryCollection):
-        polys = [
-            part for part in geom.geoms
-            if part.geom_type in ("Polygon", "MultiPolygon") and not part.is_empty
-        ]
-        if not polys:
-            return MultiPolygon([])
-        return unary_union(polys)
-    return MultiPolygon([])
+def polygon_geodesic_area(coords):
+    ring = coords[0]
+    area, _ = config.GEOD.polygon_area_perimeter(
+        [p[0] for p in ring], [p[1] for p in ring]
+    )
+    area = abs(area)
+    for hole in coords[1:]:
+        harea, _ = config.GEOD.polygon_area_perimeter(
+            [p[0] for p in hole], [p[1] for p in hole]
+        )
+        area -= abs(harea)
+    return area
 
 
-def sq_miles(geom):
-    geom = polygonal_only(geom)
-    if geom.is_empty:
+def geodesic_sq_miles(geom_dict):
+    if geom_dict is None:
         return 0.0
-    area, _ = config.GEOD.geometry_area_perimeter(geom)
-    return abs(area) / config.SQ_M_PER_SQ_MI
-
-
-def make_feature(class_id, label, color, geom, notes):
-    geom = polygonal_only(geom)
-    return {
-        "type": "Feature",
-        "geometry": mapping(geom),
-        "properties": {
-            "class_id": class_id,
-            "label": label,
-            "color": color,
-            "notes": notes,
-        },
-    }
-
-
-def geom_from_parquet(sql):
-    duck = duckdb.connect()
-    duck.execute("LOAD spatial;")
-    row = duck.execute(sql).fetchone()
-    duck.close()
-    if row is None or row[0] is None:
-        return MultiPolygon([])
-    return from_wkb(bytes(row[0]))
+    typ = geom_dict.get("type")
+    total_m2 = 0.0
+    if typ == "Polygon":
+        total_m2 = polygon_geodesic_area(geom_dict["coordinates"])
+    elif typ == "MultiPolygon":
+        for poly in geom_dict["coordinates"]:
+            total_m2 += polygon_geodesic_area(poly)
+    elif typ == "GeometryCollection":
+        for g in geom_dict.get("geometries", []):
+            total_m2 += geodesic_sq_miles(g) * config.SQ_M_PER_SQ_MI
+    return total_m2 / config.SQ_M_PER_SQ_MI
 
 
 def build_overlay():
-    growth_union = geom_from_parquet("""
-        SELECT ST_AsWKB(ST_Union_Agg(ST_MakeValid(ST_Force2D(geometry))))
-        FROM 'data/flu_areas.parquet'
-        WHERE flu_code IN ('DC', 'VC', 'VA', 'PGA')
-    """)
+    duck = duckdb.connect()
+    duck.execute("LOAD spatial;")
 
-    app_tier = geom_from_parquet("""
-        SELECT ST_AsWKB(ST_Union_Agg(ST_MakeValid(ST_Force2D(geometry))))
-        FROM 'data/tier_areas.parquet'
-        WHERE tier_code = '1B' AND version = 'APP'
-    """)
+    results = duck.execute("""
+        WITH rpc_growth AS (
+            SELECT rpc, ST_Union_Agg(geometry) AS geom
+            FROM 'data/flu_areas.parquet'
+            WHERE flu_code IN ('DC','VC','VA','PGA') AND rpc IS NOT NULL AND rpc != ''
+            GROUP BY rpc
+        ),
+        rpc_tier AS (
+            SELECT rpc, version, ST_Union_Agg(geometry) AS geom
+            FROM 'data/tier_areas.parquet'
+            WHERE tier_code = '1B' AND rpc IS NOT NULL AND rpc != ''
+            GROUP BY rpc, version
+        ),
+        rpc_tier_any AS (
+            SELECT rpc, ST_Union_Agg(geom) AS geom FROM rpc_tier GROUP BY rpc
+        ),
+        rpc_app_overlap AS (
+            SELECT g.rpc, ST_Intersection(g.geom, a.geom) AS geom
+            FROM rpc_growth g
+            JOIN rpc_tier a ON a.rpc = g.rpc AND a.version = 'APP'
+        ),
+        rpc_pre_overlap AS (
+            SELECT g.rpc,
+                CASE WHEN a.rpc IS NOT NULL
+                    THEN ST_Difference(ST_Intersection(g.geom, p.geom), a.geom)
+                    ELSE ST_Intersection(g.geom, p.geom)
+                END AS geom
+            FROM rpc_growth g
+            JOIN rpc_tier p ON p.rpc = g.rpc AND p.version = 'PRE'
+            LEFT JOIN rpc_tier a ON a.rpc = g.rpc AND a.version = 'APP'
+        ),
+        rpc_no_tier AS (
+            SELECT g.rpc,
+                ST_Difference(g.geom, COALESCE(ta.geom, ST_GeomFromText('MULTIPOLYGON EMPTY'))) AS geom
+            FROM rpc_growth g LEFT JOIN rpc_tier_any ta ON ta.rpc = g.rpc
+        )
+        SELECT
+            g.rpc,
+            ST_AsGeoJSON(g.geom) AS growth_json,
+            ST_AsGeoJSON(ao.geom) AS app_overlap_json,
+            ST_AsGeoJSON(po.geom) AS pre_overlap_json,
+            ST_AsGeoJSON(no.geom) AS no_tier_json
+        FROM rpc_growth g
+        LEFT JOIN rpc_app_overlap ao ON ao.rpc = g.rpc
+        LEFT JOIN rpc_pre_overlap po ON po.rpc = g.rpc
+        LEFT JOIN rpc_no_tier no ON no.rpc = g.rpc
+    """).fetchall()
 
-    pre_tier = geom_from_parquet("""
-        SELECT ST_AsWKB(ST_Union_Agg(ST_MakeValid(ST_Force2D(geometry))))
-        FROM 'data/tier_areas.parquet'
-        WHERE tier_code = '1B' AND version = 'PRE'
-    """)
+    duck.close()
 
-    any_tier = geom_from_parquet("""
-        SELECT ST_AsWKB(ST_Union_Agg(ST_MakeValid(ST_Force2D(geometry))))
-        FROM 'data/tier_areas.parquet'
-        WHERE tier_code = '1B'
-    """)
+    features = []
+    total_growth_sq_mi = 0.0
+    tier1b_growth_sq_mi = 0.0
 
-    app_overlap = growth_union.intersection(app_tier)
-    pre_overlap = growth_union.intersection(pre_tier).difference(app_tier)
-    no_tier = growth_union.difference(any_tier)
+    for row in results:
+        rpc_code, growth_json, app_json, pre_json, no_tier_json = row
 
-    total_growth_sq_mi = sq_miles(growth_union)
-    tier1b_growth_sq_mi = sq_miles(any_tier)
+        growth_dict = json.loads(growth_json) if growth_json else None
+        app_dict = json.loads(app_json) if app_json else None
+        pre_dict = json.loads(pre_json) if pre_json else None
+        no_tier_dict = json.loads(no_tier_json) if no_tier_json else None
+
+        g_sq = geodesic_sq_miles(growth_dict)
+        total_growth_sq_mi += g_sq
+
+        app_label = f"{config.RPC_CODES.get(rpc_code, rpc_code)}: final-app Tier 1B"
+        pre_label = f"{config.RPC_CODES.get(rpc_code, rpc_code)}: pre-app Tier 1B"
+        no_label = f"{config.RPC_CODES.get(rpc_code, rpc_code)}: outside any Tier 1B"
+
+        for is_tier, class_id, label, color, geom_dict, note in [
+            (True, "growth_app_tier1b", "Growth with final-app Tier 1B", "#1f8a4c",
+             app_dict, app_label),
+            (True, "growth_pre_tier1b", "Growth with pre-app Tier 1B", "#2f80ed",
+             pre_dict, pre_label),
+            (False, "growth_no_tier1b", "Growth Area, no Tier 1B", "#d73027",
+             no_tier_dict, no_label),
+        ]:
+            if geom_dict is None:
+                continue
+            if geom_dict.get("type") == "GeometryCollection":
+                if not geom_dict.get("geometries"):
+                    continue
+            else:
+                coords = geom_dict.get("coordinates", [])
+                if not coords or coords == [[]]:
+                    continue
+            if is_tier:
+                tier1b_growth_sq_mi += geodesic_sq_miles(geom_dict)
+
+            features.append({
+                "type": "Feature",
+                "geometry": geom_dict,
+                "properties": {
+                    "class_id": class_id,
+                    "label": f"{label} — {config.RPC_CODES.get(rpc_code, rpc_code)}",
+                    "color": color,
+                    "notes": note,
+                    "rpc": rpc_code,
+                },
+            })
+
     tier1b_growth_pct = (tier1b_growth_sq_mi / total_growth_sq_mi * 100) if total_growth_sq_mi else 0.0
 
     conn = sqlite3.connect(str(config.DB_PATH))
@@ -108,29 +159,7 @@ def build_overlay():
     fc = {
         "type": "FeatureCollection",
         "name": "Act 181 Growth Areas by Tier 1B Status",
-        "features": [
-            make_feature(
-                "growth_no_tier1b",
-                "Growth Area but no Tier 1B",
-                "#d73027",
-                no_tier,
-                "Growth categories DC, VC, VA, and PGA minus all Tier 1B geometry, including blank-version Tier 1B records.",
-            ),
-            make_feature(
-                "growth_pre_tier1b",
-                "Growth Area with pre-application Tier 1B",
-                "#2f80ed",
-                pre_overlap,
-                "Growth categories intersected with Tier 1B records where version is PRE.",
-            ),
-            make_feature(
-                "growth_app_tier1b",
-                "Growth Area with final application Tier 1B",
-                "#1f8a4c",
-                app_overlap,
-                "Growth categories intersected with Tier 1B records where version is APP.",
-            ),
-        ],
+        "features": features,
         "metadata": {
             "growth_codes": config.GROWTH_CODES,
             "growth_feature_counts": growth_counts,
@@ -140,7 +169,7 @@ def build_overlay():
                 "growth_with_any_tier1b_sq_mi": round(tier1b_growth_sq_mi, 2),
                 "growth_with_any_tier1b_pct": round(tier1b_growth_pct, 2),
             },
-            "processing_note": "Boolean overlay computed in WGS84 coordinates for map visualization.",
+            "processing_note": "Per-RPC overlay computed in WGS84 coordinates for map visualization.",
         },
     }
 
@@ -317,7 +346,7 @@ LEAFLET_TEMPLATE = """<!doctype html>
         style: { color: colors[m.id], weight: 1.2, opacity: 0.95, fillColor: colors[m.id], fillOpacity: 0.46 },
         onEachFeature(f, fl) {
           const p = f.properties || {};
-          fl.bindPopup('<div class="popup-title">' + esc(p.label||"") + '</div><div class="popup-grid"><span>Notes</span><span>' + esc(p.notes||"") + '</span><span>Class</span><span>' + esc(p.class_id||"") + '</span></div>');
+          fl.bindPopup('<div class="popup-title">' + esc(p.label||"") + '</div><div class="popup-grid"><span>RPC</span><span>' + esc(p.rpc||"") + '</span><span>Notes</span><span>' + esc(p.notes||"") + '</span></div>');
           fl.on({
             mouseover(e) { e.target.setStyle({weight:3,fillOpacity:0.52}); e.target.bringToFront(); },
             mouseout(e) { layer.resetStyle(e.target); }

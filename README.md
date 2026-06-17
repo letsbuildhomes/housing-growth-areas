@@ -14,8 +14,10 @@ in/*.geojson ──→ transform.py ──→ data/*.{db,parquet}
                             geometry validation,
                             Parquet via DuckDB spatial)
 data/*.parquet ──→ analyze.py ──→ out/
-                            (growth_tier_overlay.geojson,
-                             index.html with Leaflet map)
+                            (growth_tier_overlay.geojson
+                             with per-RPC features,
+                             index.html with Leaflet map
+                             + boundary reference layers)
 ```
 
 ## Quick start
@@ -66,7 +68,7 @@ All datasets are stored in two formats:
 - **SQLite** (`data/act181.db`) — the original storage format, still written for backward compatibility
 - **GeoParquet** (`data/*.parquet`) — geometry stored as DuckDB GEOMETRY type via the spatial extension, columnar format for fast I/O
 
-The analyze step reads from Parquet via DuckDB, which uses R-tree spatial indexes and C-level spatial SQL (`ST_Union_Agg`, `ST_Intersection`, etc.) instead of loading every geometry into Python.
+The analyze step reads from Parquet via DuckDB, computing per-RPC spatial overlays in a single SQL query with `GROUP BY rpc` and `ST_Intersection` / `ST_Difference` — all in C-level GEOS, only extracting the result geometries into Python for GeoJSON serialization.
 
 ## Normalized schemas
 
