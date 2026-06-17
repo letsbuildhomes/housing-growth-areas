@@ -27,10 +27,13 @@ def geodesic_sq_miles(geom_dict):
     typ = geom_dict.get("type")
     total_m2 = 0.0
     if typ == "Polygon":
-        total_m2 = polygon_geodesic_area(geom_dict["coordinates"])
+        coords = geom_dict.get("coordinates", [])
+        if coords and coords[0]:
+            total_m2 = polygon_geodesic_area(coords)
     elif typ == "MultiPolygon":
-        for poly in geom_dict["coordinates"]:
-            total_m2 += polygon_geodesic_area(poly)
+        for poly in geom_dict.get("coordinates", []):
+            if poly and poly[0]:
+                total_m2 += polygon_geodesic_area(poly)
     elif typ == "GeometryCollection":
         for g in geom_dict.get("geometries", []):
             total_m2 += geodesic_sq_miles(g) * config.SQ_M_PER_SQ_MI
@@ -220,6 +223,140 @@ def write_boundary_layer(layer, path):
     print(f"wrote {path}  ({len(layer['features'])} features)")
 
 
+def build_rpc_stats():
+    duck = duckdb.connect()
+    duck.execute("LOAD spatial;")
+
+    rows = duck.execute("""
+        WITH growth_union AS (
+            SELECT COALESCE(ST_Union_Agg(geometry), ST_GeomFromText('GEOMETRYCOLLECTION EMPTY')) AS geom
+            FROM 'data/flu_areas.parquet' WHERE flu_code IN ('DC','VC','VA','PGA')
+        ),
+        pre_union AS (
+            SELECT COALESCE(ST_Union_Agg(geometry), ST_GeomFromText('GEOMETRYCOLLECTION EMPTY')) AS geom
+            FROM 'data/tier_areas.parquet' WHERE tier_code='1B' AND version='PRE'
+        ),
+        app_union AS (
+            SELECT COALESCE(ST_Union_Agg(geometry), ST_GeomFromText('GEOMETRYCOLLECTION EMPTY')) AS geom
+            FROM 'data/tier_areas.parquet' WHERE tier_code='1B' AND version='APP'
+        )
+        SELECT r.name, r.rpc_code AS c,
+            ST_AsGeoJSON(r.geometry) AS rpc_geom,
+            ST_AsGeoJSON(ST_Intersection(r.geometry, g.geom)) AS growth_geom,
+            ST_AsGeoJSON(ST_Intersection(r.geometry, p.geom)) AS pre_geom,
+            ST_AsGeoJSON(ST_Intersection(r.geometry, a.geom)) AS app_geom
+        FROM 'data/boundary_rpcs.parquet' r, growth_union g, pre_union p, app_union a
+    """).fetchall()
+
+    has_growth = {r[0] for r in duck.execute(
+        "SELECT DISTINCT rpc FROM 'data/flu_areas.parquet' WHERE flu_code IN ('DC','VC','VA','PGA') AND rpc IS NOT NULL AND rpc != ''"
+    ).fetchall()}
+    has_pre = {r[0] for r in duck.execute(
+        "SELECT DISTINCT rpc FROM 'data/tier_areas.parquet' WHERE tier_code='1B' AND version='PRE'"
+    ).fetchall()}
+    has_app = {r[0] for r in duck.execute(
+        "SELECT DISTINCT rpc FROM 'data/tier_areas.parquet' WHERE tier_code='1B' AND version='APP'"
+    ).fetchall()}
+
+    duck.close()
+
+    results = []
+    sums = [0.0, 0.0, 0.0, 0.0]
+
+    for _name, code, rpc_gj, gj, pj, aj in rows:
+        rpc_gm = json.loads(rpc_gj)
+        g_gm = json.loads(gj)
+        p_gm = json.loads(pj)
+        a_gm = json.loads(aj)
+
+        rpc_sq = geodesic_sq_miles(rpc_gm)
+        g_sq = geodesic_sq_miles(g_gm)
+        p_sq = geodesic_sq_miles(p_gm)
+        a_sq = geodesic_sq_miles(a_gm)
+
+        sums[0] += rpc_sq
+        sums[1] += g_sq
+        sums[2] += p_sq
+        sums[3] += a_sq
+
+        results.append({
+            "code": code,
+            "name": config.RPC_CODES.get(code, _name),
+            "growth_pct": round(g_sq / rpc_sq * 100, 1) if rpc_sq > 0 and code in has_growth else None,
+            "tier_pre_pct": round(p_sq / rpc_sq * 100, 1) if rpc_sq > 0 and code in has_pre else None,
+            "tier_app_pct": round(a_sq / rpc_sq * 100, 1) if rpc_sq > 0 and code in has_app else None,
+        })
+
+    order = {c: i for i, c in enumerate(config.RPC_CODES)}
+    results.sort(key=lambda r: order.get(r["code"], 999))
+
+    total_rpc, total_g, total_p, total_a = sums
+    results.append({
+        "code": "VT",
+        "name": "Statewide",
+        "growth_pct": round(total_g / total_rpc * 100, 1) if total_rpc > 0 else None,
+        "tier_pre_pct": round(total_p / total_rpc * 100, 1) if total_rpc > 0 else None,
+        "tier_app_pct": round(total_a / total_rpc * 100, 1) if total_rpc > 0 else None,
+    })
+
+    return results
+
+
+def build_flu_tier_stats():
+    duck = duckdb.connect()
+    duck.execute("LOAD spatial;")
+
+    rows = duck.execute("""
+        WITH flu_by_code AS (
+            SELECT flu_code, ST_Union_Agg(geometry) AS geom
+            FROM 'data/flu_areas.parquet'
+            WHERE flu_code IN ('DC','VC','VA','PGA')
+            GROUP BY flu_code
+        ),
+        all_flu AS (
+            SELECT ST_Union_Agg(geometry) AS geom
+            FROM 'data/flu_areas.parquet'
+            WHERE flu_code IN ('DC','VC','VA','PGA')
+        ),
+        tier_union AS (
+            SELECT COALESCE(ST_Union_Agg(geometry), ST_GeomFromText('GEOMETRYCOLLECTION EMPTY')) AS geom
+            FROM 'data/tier_areas.parquet' WHERE tier_code='1B'
+        )
+        SELECT f.flu_code,
+            ST_AsGeoJSON(f.geom) AS total_json,
+            ST_AsGeoJSON(COALESCE(ST_Intersection(f.geom, t.geom), ST_GeomFromText('GEOMETRYCOLLECTION EMPTY'))) AS overlap_json
+        FROM flu_by_code f, tier_union t
+        UNION ALL
+        SELECT 'ALL' AS flu_code,
+            ST_AsGeoJSON(a.geom) AS total_json,
+            ST_AsGeoJSON(COALESCE(ST_Intersection(a.geom, t.geom), ST_GeomFromText('GEOMETRYCOLLECTION EMPTY'))) AS overlap_json
+        FROM all_flu a, tier_union t
+    """).fetchall()
+
+    duck.close()
+
+    results = []
+    for code, total_json, overlap_json in rows:
+        total_gm = json.loads(total_json)
+        overlap_gm = json.loads(overlap_json)
+
+        total_sq = geodesic_sq_miles(total_gm)
+        overlap_sq = geodesic_sq_miles(overlap_gm)
+
+        name = "All Growth Areas" if code == "ALL" else config.GROWTH_CODES.get(code, code)
+        results.append({
+            "code": code,
+            "name": name,
+            "total_sq_mi": round(total_sq, 1),
+            "tier1b_sq_mi": round(overlap_sq, 1),
+            "pct": round(overlap_sq / total_sq * 100, 1) if total_sq > 0 else None,
+        })
+
+    order = {c: i for i, c in enumerate(config.GROWTH_CODES)}
+    results.sort(key=lambda r: (r["code"] == "ALL", order.get(r["code"], 99)))
+    return results
+
+
 LEAFLET_TEMPLATE = """<!doctype html>
 <html lang="en">
 <head>
@@ -243,19 +380,10 @@ LEAFLET_TEMPLATE = """<!doctype html>
       --rpc-border: #222;
     }
     * { box-sizing: border-box; }
-    html, body { height: 100%; margin: 0; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: var(--ink); }
-    body { overflow: hidden; }
-    #app { height: 100%; display: grid; grid-template-rows: auto 1fr; background: #eef2f1; }
-    header {
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) auto;
-      gap: 16px;
-      align-items: center;
-      padding: 12px 14px;
-      border-bottom: 1px solid var(--line);
-      background: var(--panel);
-      z-index: 500;
-    }
+    html { margin: 0; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: var(--ink); }
+    body { margin: 0; background: #eef2f1; }
+    header { border-bottom: 1px solid var(--line); background: var(--panel); }
+    .header-inner { max-width: 1100px; margin: 0 auto; padding: 12px 14px; }
     h1 { margin: 0; font-size: 18px; line-height: 1.2; font-weight: 680; }
     .sub { margin-top: 3px; color: var(--muted); font-size: 13px; }
     .stats { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
@@ -265,7 +393,9 @@ LEAFLET_TEMPLATE = """<!doctype html>
     .toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: flex-end; }
     button { height: 34px; border: 1px solid var(--line); background: #fff; color: var(--ink); font: inherit; font-size: 13px; border-radius: 6px; padding: 0 11px; cursor: pointer; }
     button:hover { border-color: var(--accent); color: var(--accent-dark); }
-    #map { min-height: 0; height: 100%; width: 100%; }
+    #map-wrapper { position: relative; height: 55vh; max-width: 1100px; margin: 14px auto; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 6px rgba(0,0,0,0.1); }
+    #map-wrapper.fullscreen { position: fixed; inset: 0; z-index: 9999; height: 100vh; max-width: none; width: 100vw; border-radius: 0; margin: 0; }
+    #map { height: 100%; width: 100%; }
     .leaflet-popup-content { margin: 10px 12px; min-width: 220px; }
     .popup-title { font-weight: 700; margin-bottom: 6px; }
     .popup-grid { display: grid; grid-template-columns: 82px minmax(0, 1fr); gap: 4px 10px; font-size: 13px; }
@@ -275,41 +405,90 @@ LEAFLET_TEMPLATE = """<!doctype html>
     .info .sec { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--line); }
     .legend-row { display: flex; align-items: center; gap: 7px; margin-top: 5px; }
     .swatch { width: 13px; height: 13px; border-radius: 3px; border: 1px solid rgba(0,0,0,0.25); flex-shrink: 0; }
+    .leaflet-control-layers { margin-top: 1em !important; }
+    .leaflet-control-fullscreen { width: 34px; height: 34px; background: #fff; border: 1px solid var(--line); border-radius: 4px; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 16px; color: var(--ink); }
+    .leaflet-control-fullscreen:hover { border-color: var(--accent); color: var(--accent-dark); }
+    #mid-stats { max-width: 1100px; margin: 14px auto 0; padding: 0 14px; display: flex; flex-wrap: wrap; gap: 8px; }
+    #mid-stats .stat { min-width: 148px; padding: 7px 9px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); }
+    .data-table-wrap { max-width: 1100px; margin: 14px auto; padding: 0 14px; }
+    .data-table-wrap:last-of-type { margin-bottom: 40px; }
+    .data-table-wrap h2 { margin: 0 0 12px; font-size: 15px; font-weight: 680; }
+    .data-table-wrap table { width: 100%; border-collapse: collapse; font-size: 13px; background: var(--panel); border-radius: 8px; box-shadow: 0 1px 6px rgba(0,0,0,0.1); overflow: hidden; }
+    .data-table-wrap th, .data-table-wrap td { padding: 10px 14px; text-align: right; border-bottom: 1px solid var(--line); }
+    .data-table-wrap th { font-weight: 600; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; background: #f7f9fa; }
+    .data-table-wrap th:first-child, .data-table-wrap td:first-child { text-align: left; }
+    .data-table-wrap tbody tr:hover { background: #f7f9fa; }
+    .data-table-wrap tfoot td { font-weight: 700; border-top: 2px solid var(--ink); border-bottom: none; background: #f7f9fa; }
+    .blank { color: var(--muted); }
+    .num { font-variant-numeric: tabular-nums; }
     @media (max-width: 760px) {
       header { grid-template-columns: 1fr; gap: 10px; }
       .toolbar { justify-content: flex-start; }
+      #map-wrapper { height: 40vh; margin: 10px; border-radius: 6px; }
+      #rpc-table-wrap { padding: 0 10px; }
+      #rpc-table-wrap th, #rpc-table-wrap td { padding: 8px 6px; font-size: 12px; }
     }
-    .leaflet-control-layers{margin-top:1em!important}
   </style>
 </head>
 <body>
-  <div id="app">
-    <header>
-      <div>
-        <h1>Act 181 Growth Areas and Tier 1B</h1>
-        <div class="sub">FLU growth categories DC, VC, VA, and PGA classified by Tier 1B overlap</div>
-        <div class="stats">
-          <div class="stat"><span class="stat-value" id="stat-total-growth">--</span><span class="stat-label">sq mi growth areas</span></div>
-          <div class="stat"><span class="stat-value" id="stat-tier-growth">--</span><span class="stat-label">sq mi growth area + any Tier 1B</span></div>
-          <div class="stat"><span class="stat-value" id="stat-tier-pct">--</span><span class="stat-label">growth area land mass with Tier 1B</span></div>
-        </div>
-      </div>
-      <div class="toolbar">
-        <button type="button" id="fit">Fit</button>
-      </div>
-    </header>
-    <main id="map"></main>
+  <header>
+    <div class="header-inner">
+      <h1>Act 181 Growth Areas and Tier 1B</h1>
+      <div class="sub">FLU growth categories DC, VC, VA, and PGA classified by Tier 1B overlap</div>
+    </div>
+  </header>
+  <main id="map-wrapper">
+    <div id="map"></div>
+  </main>
+  <div class="stats" id="mid-stats">
+    <div class="stat"><span class="stat-value" id="stat-total-growth">--</span><span class="stat-label">sq mi growth areas</span></div>
+    <div class="stat"><span class="stat-value" id="stat-tier-growth">--</span><span class="stat-label">sq mi growth area + any Tier 1B</span></div>
+    <div class="stat"><span class="stat-value" id="stat-tier-pct">--</span><span class="stat-label">growth area land mass with Tier 1B</span></div>
   </div>
+  <section id="flu-tier-wrap" class="data-table-wrap">
+    <h2>Growth Area Designations Overlapping Tier 1B</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Designation</th>
+          <th>Total sq mi</th>
+          <th>Tier 1B sq mi</th>
+          <th>% in Tier 1B</th>
+        </tr>
+      </thead>
+      <tbody id="flu-tier-tbody"></tbody>
+      <tfoot id="flu-tier-tfoot"></tfoot>
+    </table>
+  </section>
+  <section id="rpc-table-wrap" class="data-table-wrap">
+    <h2>RPC Land Area in Growth Areas and Tier 1B</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>RPC</th>
+          <th>% in Growth Area</th>
+          <th>% in Tier 1B (Pre-App)</th>
+          <th>% in Tier 1B (Final App)</th>
+        </tr>
+      </thead>
+      <tbody id="rpc-tbody"></tbody>
+      <tfoot id="rpc-tfoot"></tfoot>
+    </table>
+  </section>
   <script id="overlay-data" type="application/json">__GEOJSON__</script>
   <script id="towns-data" type="application/json">__TOWNS__</script>
   <script id="counties-data" type="application/json">__COUNTIES__</script>
   <script id="rpcs-data" type="application/json">__RPCS__</script>
+  <script id="rpc-stats-data" type="application/json">__RPC_STATS__</script>
+  <script id="flu-tier-stats-data" type="application/json">__FLU_TIER_STATS__</script>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script>
     const data = JSON.parse(document.getElementById("overlay-data").textContent);
     const townsData = JSON.parse(document.getElementById("towns-data").textContent);
     const countiesData = JSON.parse(document.getElementById("counties-data").textContent);
     const rpcsData = JSON.parse(document.getElementById("rpcs-data").textContent);
+    const rpcStats = JSON.parse(document.getElementById("rpc-stats-data").textContent);
+    const fluTierStats = JSON.parse(document.getElementById("flu-tier-stats-data").textContent);
 
     const map = L.map("map", { zoomControl: true }).setView([44.05, -72.7], 8);
     L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
@@ -375,10 +554,10 @@ LEAFLET_TEMPLATE = """<!doctype html>
     };
     legend.addTo(map);
 
-    // Boundary reference layers (off by default)
+    // Boundary reference layers (on by default for RPCs and towns)
     const boundaryLayers = {};
-    function addBoundaryLayer(fc, label, style) {
-      if (!fc || !fc.features || fc.features.length === 0) return;
+    function addBoundaryLayer(fc, label, style, addToMap) {
+      if (!fc || !fc.features || fc.features.length === 0) return null;
       const layer = L.geoJSON(fc, {
         style: style,
         onEachFeature(f, fl) {
@@ -388,19 +567,20 @@ LEAFLET_TEMPLATE = """<!doctype html>
       });
       boundaryLayers[label] = layer;
       if (allBounds) allBounds.extend(layer.getBounds());
+      if (addToMap) layer.addTo(map);
+      return layer;
     }
 
     addBoundaryLayer(townsData, "Towns", {
       color: "var(--town-border)", weight: 0.6, opacity: 0.7, fill: false
-    });
+    }, true);
     addBoundaryLayer(countiesData, "Counties", {
       color: "var(--county-border)", weight: 1.4, opacity: 0.6, fill: false
-    });
+    }, false);
     addBoundaryLayer(rpcsData, "RPCs", {
       color: "var(--rpc-border)", weight: 2.2, opacity: 0.5, fill: false
-    });
+    }, true);
 
-    // Combine overlay and boundary layers for layer control
     const allLayers = {};
     Object.assign(allLayers, overlayLayers);
     Object.assign(allLayers, boundaryLayers);
@@ -409,8 +589,39 @@ LEAFLET_TEMPLATE = """<!doctype html>
       L.control.layers(null, allLayers, { position: "topright" }).addTo(map);
     }
 
-    document.getElementById("fit").addEventListener("click", () => {
-      if (allBounds && allBounds.isValid()) map.fitBounds(allBounds, {padding:[18,18]});
+    // Fullscreen control
+    L.Control.Fullscreen = L.Control.extend({
+      options: { position: "topleft" },
+      onAdd: function() {
+        const btn = L.DomUtil.create("button", "leaflet-control-fullscreen");
+        btn.innerHTML = "\\u26F6";
+        btn.title = "Toggle fullscreen";
+        const wrapper = document.getElementById("map-wrapper");
+        L.DomEvent.on(btn, "click", function() {
+          wrapper.classList.toggle("fullscreen");
+          map.invalidateSize();
+          btn.innerHTML = wrapper.classList.contains("fullscreen") ? "\\u2715" : "\\u26F6";
+          if (wrapper.classList.contains("fullscreen")) {
+            document.body.style.overflow = "hidden";
+          } else {
+            document.body.style.overflow = "";
+          }
+        });
+        return btn;
+      }
+    });
+    new L.Control.Fullscreen().addTo(map);
+
+    document.addEventListener("keydown", function(e) {
+      if (e.key === "Escape") {
+        const wrapper = document.getElementById("map-wrapper");
+        if (wrapper.classList.contains("fullscreen")) {
+          wrapper.classList.remove("fullscreen");
+          map.invalidateSize();
+          document.body.style.overflow = "";
+          document.querySelector(".leaflet-control-fullscreen").innerHTML = "\\u26F6";
+        }
+      }
     });
 
     const s = (data.metadata||{}).area_stats||{};
@@ -418,13 +629,73 @@ LEAFLET_TEMPLATE = """<!doctype html>
     document.getElementById("stat-tier-growth").textContent = fmtNumber(s.growth_with_any_tier1b_sq_mi, 1);
     document.getElementById("stat-tier-pct").textContent = fmtNumber(s.growth_with_any_tier1b_pct, 1) + "%";
     if (allBounds && allBounds.isValid()) map.fitBounds(allBounds, {padding:[18,18]});
+
+    // Render RPC stats table
+    function pctCell(v) {
+      if (v == null) return '<span class="blank">&mdash;</span>';
+      return '<span class="num">' + fmtNumber(v, 1) + '%</span>';
+    }
+
+    function renderRpcTable(stats) {
+      const tbody = document.getElementById("rpc-tbody");
+      const tfoot = document.getElementById("rpc-tfoot");
+      let html = "";
+      for (let i = 0; i < stats.length; i++) {
+        const r = stats[i];
+        const row = '<tr>'
+          + '<td>' + esc(r.name) + '</td>'
+          + '<td>' + pctCell(r.growth_pct) + '</td>'
+          + '<td>' + pctCell(r.tier_pre_pct) + '</td>'
+          + '<td>' + pctCell(r.tier_app_pct) + '</td>'
+          + '</tr>';
+        if (r.code === "VT") {
+          // Last entry is statewide, goes to tfoot
+        } else {
+          html += row;
+        }
+      }
+      tbody.innerHTML = html;
+      // Statewide row
+      const sw = stats[stats.length - 1];
+      tfoot.innerHTML = '<tr>'
+        + '<td>' + esc(sw.name) + '</td>'
+        + '<td>' + pctCell(sw.growth_pct) + '</td>'
+        + '<td>' + pctCell(sw.tier_pre_pct) + '</td>'
+        + '<td>' + pctCell(sw.tier_app_pct) + '</td>'
+        + '</tr>';
+    }
+
+    renderRpcTable(rpcStats);
+
+    // Render FLU tier breakdown table
+    function renderFluTierTable(stats) {
+      const tbody = document.getElementById("flu-tier-tbody");
+      const tfoot = document.getElementById("flu-tier-tfoot");
+      let html = "";
+      for (const r of stats) {
+        const row = '<tr>'
+          + '<td>' + esc(r.name) + '</td>'
+          + '<td class="num">' + fmtNumber(r.total_sq_mi, 1) + '</td>'
+          + '<td class="num">' + fmtNumber(r.tier1b_sq_mi, 1) + '</td>'
+          + '<td>' + pctCell(r.pct) + '</td>'
+          + '</tr>';
+        if (r.code === "ALL") {
+          tfoot.innerHTML = row;
+        } else {
+          html += row;
+        }
+      }
+      tbody.innerHTML = html;
+    }
+
+    renderFluTierTable(fluTierStats);
   </script>
 </body>
 </html>
 """
 
 
-def write_leaflet(geojson_path, html_path, towns_fc, counties_fc, rpcs_fc):
+def write_leaflet(geojson_path, html_path, towns_fc, counties_fc, rpcs_fc, rpc_stats, flu_tier_stats):
     geojson = geojson_path.read_text()
     geojson = geojson.replace("</script", "<\\/script")
 
@@ -432,11 +703,16 @@ def write_leaflet(geojson_path, html_path, towns_fc, counties_fc, rpcs_fc):
         text = json.dumps(fc, separators=(",", ":"))
         return text.replace("</script", "<\\/script")
 
+    rpc_json = json.dumps(rpc_stats, separators=(",", ":"))
+    flu_json = json.dumps(flu_tier_stats, separators=(",", ":"))
+
     html = (LEAFLET_TEMPLATE
         .replace("__GEOJSON__", geojson)
         .replace("__TOWNS__", dump(towns_fc))
         .replace("__COUNTIES__", dump(counties_fc))
         .replace("__RPCS__", dump(rpcs_fc))
+        .replace("__RPC_STATS__", rpc_json)
+        .replace("__FLU_TIER_STATS__", flu_json)
     )
     html_path.write_text(html)
     print(f"wrote {html_path}")
@@ -463,11 +739,14 @@ def main():
         {"color": "#222", "weight": 2.2, "opacity": 0.5, "fill": False},
     )
 
+    rpc_stats = build_rpc_stats()
+    flu_tier_stats = build_flu_tier_stats()
+
     overlay_path = config.OUT_DIR / "growth_tier_overlay.geojson"
     html_path = config.OUT_DIR / "index.html"
 
     write_overlay(overlay, overlay_path)
-    write_leaflet(overlay_path, html_path, towns_fc, counties_fc, rpcs_fc)
+    write_leaflet(overlay_path, html_path, towns_fc, counties_fc, rpcs_fc, rpc_stats, flu_tier_stats)
     print("Done")
 
 
