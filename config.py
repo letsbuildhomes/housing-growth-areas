@@ -6,6 +6,7 @@ IN_DIR = ROOT / "in"
 DATA_DIR = ROOT / "data"
 OUT_DIR = ROOT / "out"
 DB_PATH = DATA_DIR / "act181.db"
+PARQUET_DIR = DATA_DIR
 
 SQ_M_PER_SQ_MI = 2589988.110336
 GEOD = Geod(ellps="WGS84")
@@ -71,6 +72,18 @@ SOURCES = {
     "tier_ac_pre": {
         "url": "https://services8.arcgis.com/Gf7J70KyUdpb0dNE/arcgis/rest/services/AC_TIER1B_PRE_poly_2026/FeatureServer/1",
         "domain": "tier",
+    },
+    "boundary_towns": {
+        "url": "https://services1.arcgis.com/BkFxaEFNwHqX3tAw/arcgis/rest/services/FS_VCGI_OPENDATA_Boundary_BNDHASH_poly_towns_SP_v1/FeatureServer/0",
+        "domain": "boundary",
+    },
+    "boundary_counties": {
+        "url": "https://services1.arcgis.com/BkFxaEFNwHqX3tAw/arcgis/rest/services/FS_VCGI_OPENDATA_Boundary_BNDHASH_poly_counties_SP_v1/FeatureServer/0",
+        "domain": "boundary",
+    },
+    "boundary_rpcs": {
+        "url": "https://services1.arcgis.com/BkFxaEFNwHqX3tAw/arcgis/rest/services/FS_VCGI_OPENDATA_Boundary_BNDHASH_poly_rpcs_SP_v1/FeatureServer/0",
+        "domain": "boundary",
     },
 }
 
@@ -198,6 +211,21 @@ FIELD_MAPS = {
         "VERS_RPC": "version",
         "DATE_RPC": "date_subm",
     },
+    "boundary_towns": {
+        "OBJECTID": "source_oid",
+        "TOWNNAME": "name",
+        "TOWNGEOID": "geoid",
+    },
+    "boundary_counties": {
+        "OBJECTID": "source_oid",
+        "CNTYNAME": "name",
+        "CNTYGEOID": "geoid",
+    },
+    "boundary_rpcs": {
+        "OBJECTID": "source_oid",
+        "RPC": "rpc_code",
+        "SHORTNAME": "name",
+    },
 }
 
 VERSION_NORMALIZE = {
@@ -221,6 +249,12 @@ RPC_NAME_TO_CODE = {
     "Mount Ascutney Regional Commission": "MA",
     "Two Rivers-Ottauquechee Regional Commission": "TR",
     "Windham Regional Commission": "WR",
+}
+
+BOUNDARY_TYPE_MAP = {
+    "_towns": "town",
+    "_counties": "county",
+    "_rpcs": "rpc",
 }
 
 FLU_NAME_TO_CODE = {
@@ -289,6 +323,24 @@ CREATE TABLE IF NOT EXISTS tier_areas (
     date_lurb TEXT,
     date_agg TEXT,
     notes TEXT,
+    source_layer TEXT,
+    source_oid INTEGER
+)
+"""
+
+BOUNDARY_COLUMNS = [
+    "id", "geometry", "boundary_type", "name", "geoid",
+    "rpc_code", "source_layer", "source_oid",
+]
+
+BOUNDARY_CREATE_SQL = """
+CREATE TABLE IF NOT EXISTS boundary_areas (
+    id TEXT PRIMARY KEY,
+    geometry BLOB,
+    boundary_type TEXT,
+    name TEXT,
+    geoid TEXT,
+    rpc_code TEXT,
     source_layer TEXT,
     source_oid INTEGER
 )

@@ -60,6 +60,34 @@ def main():
     print(f"  FLU coverage: {sum(1 for r in flu_by_rpc)}/{len(all_rpcs)} RPCs  |  Growth: {sum(1 for r in flu_growth_by_rpc)}/{len(all_rpcs)}")
     print()
 
+    print()
+    print(f"  Boundary data")
+    print(f"  {'─' * 52}")
+    boundary_counts = {}
+    for row in conn.execute(
+        "SELECT boundary_type, COUNT(*) FROM boundary_areas GROUP BY boundary_type ORDER BY boundary_type"
+    ):
+        bt, cnt = row
+        boundary_counts[bt] = cnt
+    plural = {"town": "towns", "county": "counties", "rpc": "rpcs"}
+    for bt in ["town", "county", "rpc"]:
+        cnt = boundary_counts.get(bt, 0)
+        print(f"  {plural[bt]:<12} {cnt} features")
+
+    print()
+    print(f"  Parquet files")
+    print(f"  {'─' * 52}")
+    import duckdb
+    duck = duckdb.connect()
+    duck.execute("LOAD spatial;")
+    for fname in ["flu_areas", "tier_areas", "boundary_towns", "boundary_counties", "boundary_rpcs"]:
+        path = config.PARQUET_DIR / f"{fname}.parquet"
+        if path.exists():
+            cnt = duck.execute(f"SELECT COUNT(*) FROM '{path}'").fetchone()[0]
+            size = path.stat().st_size
+            print(f"  {fname:<20} {cnt:>5} rows  {size // 1024:>5} KB")
+    duck.close()
+
     conn.close()
 
 

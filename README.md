@@ -6,14 +6,16 @@ Analyzes the spatial overlap between Act 181 growth areas (Downtown Center, Vill
 
 ```
 ArcGIS feature services ──→ extract.py ──→ in/*.geojson
-                                      (raw schema, one per source)
-in/*.geojson ──→ transform.py ──→ data/act181.db
-                          (field mapping, Windham repair,
-                           version/RPC normalization,
-                           FLU-shaped tier sources → tier_code="1B")
-data/act181.db ──→ analyze.py ──→ out/
-                          (growth_tier_overlay.geojson,
-                           index.html with Leaflet map)
+                                       (raw schema, one per source)
+in/*.geojson ──→ transform.py ──→ data/*.{db,parquet}
+                           (field mapping, Windham repair,
+                            version/RPC normalization,
+                            FLU-shaped tier sources → tier_code="1B",
+                            geometry validation,
+                            Parquet via DuckDB spatial)
+data/*.parquet ──→ analyze.py ──→ out/
+                            (growth_tier_overlay.geojson,
+                             index.html with Leaflet map)
 ```
 
 ## Quick start
@@ -28,7 +30,9 @@ make status  # shows data coverage per RPC
 
 ## Data sources
 
-10 ArcGIS feature services are queried:
+13 ArcGIS feature services are queried:
+
+### FLU and Tier
 
 | Source | RPCs | Content |
 |---|---|---|
@@ -43,13 +47,32 @@ make status  # shows data coverage per RPC
 | `tier_ma_pre` | MA | MA pre-app Tier 1B (has native TIER_AREA) |
 | `tier_lc_pre` | LC | LC pre-app Tier 1B (has native TIER_AREA) |
 
+### Boundaries (VCGI BNDHASH)
+
+| Source | Features | Content |
+|---|---|---|
+| `boundary_towns` | 256 | Vermont town/municipal boundaries |
+| `boundary_counties` | 14 | Vermont county boundaries |
+| `boundary_rpcs` | 11 | Vermont Regional Planning Commission boundaries |
+
+All three boundary layers come from VCGI's integrated BNDHASH dataset, which maintains vertically-integrated town/county/RPC boundaries. The `RPC` field in the RPC layer uses the same 2-letter codes as the rest of the pipeline.
+
 Sources with `_pre` suffix are per-RPC pre-application services that haven't been merged into the consolidated public service yet.
+
+## Storage format
+
+All datasets are stored in two formats:
+
+- **SQLite** (`data/act181.db`) — the original storage format, still written for backward compatibility
+- **GeoParquet** (`data/*.parquet`) — geometry stored as DuckDB GEOMETRY type via the spatial extension, columnar format for fast I/O
+
+The analyze step reads from Parquet via DuckDB, which uses R-tree spatial indexes and C-level spatial SQL (`ST_Union_Agg`, `ST_Intersection`, etc.) instead of loading every geometry into Python.
 
 ## Normalized schemas
 
-Both tables store geometry as WKB hex blobs with a `source_layer` + `source_oid` provenance chain back to the origin service.
+All tables store geometry with a `source_layer` + `source_oid` provenance chain back to the origin service.
 
-**`flu_areas`** — 9,657 records across 10 RPCs, 16 FLU codes.
+**`flu_areas`** — ~9,650 records across 10 RPCs, 16 FLU codes.
 
 | Column | Source |
 |---|---|
@@ -60,7 +83,7 @@ Both tables store geometry as WKB hex blobs with a `source_layer` + `source_oid`
 | `desig_center_step` | 1 (Beginner), 2 (Intermediate), 3 (Advanced) |
 | `source_layer` | Which config source key this record came from |
 
-**`tier_areas`** — 863 records, all Tier 1B, across 9 RPCs.
+**`tier_areas`** — ~860 records, all Tier 1B, across 9 RPCs.
 
 | Column | Source |
 |---|---|
@@ -69,6 +92,15 @@ Both tables store geometry as WKB hex blobs with a `source_layer` + `source_oid`
 | `version` | PRE / APP / NULL (443 Windham orphans have NULL) |
 | `submitter` | RPC, MUNI, or LURB |
 | `date_subm` | Date from submitter |
+
+**`boundary_areas`** — 281 records across 3 types.
+
+| Column | Source |
+|---|---|
+| `boundary_type` | `town`, `county`, or `rpc` |
+| `name` | Town name, county name, or RPC short name |
+| `geoid` | TOWNGEOID / CNTYGEOID / RPC code |
+| `rpc_code` | RPC 2-letter code (only populated for RPC boundaries) |
 
 ## Windham orphan repair
 
@@ -87,8 +119,8 @@ Both tables store geometry as WKB hex blobs with a `source_layer` + `source_oid`
 |---|---|
 | `make` | extract → transform → analyze → status |
 | `make extract` | Download fresh data from ArcGIS (skips cached files) |
-| `make transform` | Normalize all sources into `data/act181.db` |
-| `make analyze` | Generate overlay GeoJSON + Leaflet map |
+| `make transform` | Normalize all sources into `data/act181.db` + `data/*.parquet` |
+| `make analyze` | Generate overlay GeoJSON + Leaflet map (uses DuckDB spatial) |
 | `make status` | Coverage table per RPC |
 | `make clean` | Remove all generated artifacts |
 | `make rebuild` | `make clean` + `make` |
@@ -159,4 +191,4 @@ Check the status table to confirm the new RPC's data appears in the right column
 
 ## Dependencies
 
-Python ≥3.9, `shapely`, `pyproj`. Managed via `uv`.
+Python ≥3.9, `shapely`, `pyproj`, `duckdb`. Managed via `uv` — `duckdb` has a pure-Python wheel with no system requirements. The spatial extension is loaded at runtime via DuckDB's extension mechanism (`INSTALL spatial; LOAD spatial;`), no host-side install needed.

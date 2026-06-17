@@ -3,34 +3,13 @@ import json
 import sqlite3
 from pathlib import Path
 
-from shapely import from_wkb, to_wkb
-from shapely.geometry import GeometryCollection, MultiPolygon, mapping
+from shapely import from_wkb
+from shapely.geometry import GeometryCollection, MultiPolygon, mapping, shape
 from shapely.ops import unary_union
-from shapely.validation import make_valid
+
+import duckdb
 
 import config
-
-
-def load_geometries(conn, table, column, values):
-    placeholders = ", ".join("?" for _ in values)
-    query = f"SELECT geometry, rpc, version FROM {table} WHERE {column} IN ({placeholders})"
-    rows = conn.execute(query, list(values)).fetchall()
-    results = []
-    for geom_wkb, rpc, version in rows:
-        if not geom_wkb:
-            continue
-        try:
-            geom = from_wkb(bytes.fromhex(geom_wkb))
-            if geom is None or geom.is_empty:
-                continue
-            if geom.geom_type not in ("Polygon", "MultiPolygon"):
-                geom = polygonal_only(geom)
-            if geom.is_empty:
-                continue
-            results.append((make_valid(geom), rpc, version))
-        except Exception:
-            continue
-    return results
 
 
 def polygonal_only(geom):
@@ -47,14 +26,6 @@ def polygonal_only(geom):
             return MultiPolygon([])
         return unary_union(polys)
     return MultiPolygon([])
-
-
-def union_all(geoms):
-    geoms = [g for g in geoms if g is not None and not g.is_empty]
-    if not geoms:
-        return MultiPolygon([])
-    result = unary_union(geoms)
-    return polygonal_only(result)
 
 
 def sq_miles(geom):
@@ -79,16 +50,40 @@ def make_feature(class_id, label, color, geom, notes):
     }
 
 
-def build_overlay(conn):
-    growth_geoms = load_geometries(conn, "flu_areas", "flu_code", list(config.GROWTH_CODES))
-    tier_geoms = load_geometries(conn, "tier_areas", "tier_code", ["1B"])
+def geom_from_parquet(sql):
+    duck = duckdb.connect()
+    duck.execute("LOAD spatial;")
+    row = duck.execute(sql).fetchone()
+    duck.close()
+    if row is None or row[0] is None:
+        return MultiPolygon([])
+    return from_wkb(bytes(row[0]))
 
-    growth_union = union_all([g for g, *_ in growth_geoms])
-    all_tier = union_all([g for g, *_ in tier_geoms])
 
-    pre_tier = union_all([g for g, r, v in tier_geoms if v == "PRE"])
-    app_tier = union_all([g for g, r, v in tier_geoms if v == "APP"])
-    any_tier = union_all([g for g, r, v in tier_geoms])
+def build_overlay():
+    growth_union = geom_from_parquet("""
+        SELECT ST_AsWKB(ST_Union_Agg(ST_MakeValid(ST_Force2D(geometry))))
+        FROM 'data/flu_areas.parquet'
+        WHERE flu_code IN ('DC', 'VC', 'VA', 'PGA')
+    """)
+
+    app_tier = geom_from_parquet("""
+        SELECT ST_AsWKB(ST_Union_Agg(ST_MakeValid(ST_Force2D(geometry))))
+        FROM 'data/tier_areas.parquet'
+        WHERE tier_code = '1B' AND version = 'APP'
+    """)
+
+    pre_tier = geom_from_parquet("""
+        SELECT ST_AsWKB(ST_Union_Agg(ST_MakeValid(ST_Force2D(geometry))))
+        FROM 'data/tier_areas.parquet'
+        WHERE tier_code = '1B' AND version = 'PRE'
+    """)
+
+    any_tier = geom_from_parquet("""
+        SELECT ST_AsWKB(ST_Union_Agg(ST_MakeValid(ST_Force2D(geometry))))
+        FROM 'data/tier_areas.parquet'
+        WHERE tier_code = '1B'
+    """)
 
     app_overlap = growth_union.intersection(app_tier)
     pre_overlap = growth_union.intersection(pre_tier).difference(app_tier)
@@ -98,6 +93,7 @@ def build_overlay(conn):
     tier1b_growth_sq_mi = sq_miles(any_tier)
     tier1b_growth_pct = (tier1b_growth_sq_mi / total_growth_sq_mi * 100) if total_growth_sq_mi else 0.0
 
+    conn = sqlite3.connect(str(config.DB_PATH))
     growth_counts = {}
     for row in conn.execute("SELECT flu_code, COUNT(*) FROM flu_areas WHERE flu_code IN ("
                              + ",".join("?" for _ in config.GROWTH_CODES)
@@ -107,6 +103,7 @@ def build_overlay(conn):
     tier_counts = {}
     for row in conn.execute("SELECT version, COUNT(*) FROM tier_areas WHERE tier_code='1B' GROUP BY version"):
         tier_counts[row[0] or "OTHER"] = row[1]
+    conn.close()
 
     fc = {
         "type": "FeatureCollection",
@@ -150,11 +147,48 @@ def build_overlay(conn):
     return fc
 
 
+def load_boundary_layer(parquet_path, label, style):
+    duck = duckdb.connect()
+    duck.execute("LOAD spatial;")
+    rows = duck.execute(f"""
+        SELECT name, geoid, source_layer, ST_AsGeoJSON(ST_Force2D(geometry)) AS geojson
+        FROM '{parquet_path}'
+    """).fetchall()
+    duck.close()
+
+    features = []
+    for name, geoid, source_layer, geojson_str in rows:
+        if not geojson_str:
+            continue
+        features.append({
+            "type": "Feature",
+            "geometry": json.loads(geojson_str),
+            "properties": {
+                "name": name or "",
+                "geoid": geoid or "",
+                "label": label,
+                "source_layer": source_layer or "",
+            },
+        })
+
+    return {
+        "type": "FeatureCollection",
+        "label": label,
+        "style": style,
+        "features": features,
+    }
+
+
 def write_overlay(fc, path):
     path.write_text(json.dumps(fc, separators=(",", ":")))
     print(f"wrote {path}")
     meta = fc.get("metadata", {})
     print(json.dumps(meta.get("area_stats", {}), indent=2))
+
+
+def write_boundary_layer(layer, path):
+    path.write_text(json.dumps(layer, separators=(",", ":")))
+    print(f"wrote {path}  ({len(layer['features'])} features)")
 
 
 LEAFLET_TEMPLATE = """<!doctype html>
@@ -175,6 +209,9 @@ LEAFLET_TEMPLATE = """<!doctype html>
       --growth-only: #d73027;
       --pre: #2f80ed;
       --app: #1f8a4c;
+      --town-border: #888;
+      --county-border: #444;
+      --rpc-border: #222;
     }
     * { box-sizing: border-box; }
     html, body { height: 100%; margin: 0; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: var(--ink); }
@@ -206,8 +243,9 @@ LEAFLET_TEMPLATE = """<!doctype html>
     .popup-grid span:nth-child(odd) { color: var(--muted); }
     .info { padding: 9px 10px; background: rgba(255,255,255,0.96); border: 1px solid var(--line); border-radius: 6px; box-shadow: 0 1px 8px rgba(20,30,40,0.12); font-size: 13px; min-width: 170px; margin-top: 1em; }
     .info strong { display: block; margin-bottom: 4px; font-size: 14px; }
+    .info .sec { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--line); }
     .legend-row { display: flex; align-items: center; gap: 7px; margin-top: 5px; }
-    .swatch { width: 13px; height: 13px; border-radius: 3px; border: 1px solid rgba(0,0,0,0.25); }
+    .swatch { width: 13px; height: 13px; border-radius: 3px; border: 1px solid rgba(0,0,0,0.25); flex-shrink: 0; }
     @media (max-width: 760px) {
       header { grid-template-columns: 1fr; gap: 10px; }
       .toolbar { justify-content: flex-start; }
@@ -234,9 +272,16 @@ LEAFLET_TEMPLATE = """<!doctype html>
     <main id="map"></main>
   </div>
   <script id="overlay-data" type="application/json">__GEOJSON__</script>
+  <script id="towns-data" type="application/json">__TOWNS__</script>
+  <script id="counties-data" type="application/json">__COUNTIES__</script>
+  <script id="rpcs-data" type="application/json">__RPCS__</script>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script>
     const data = JSON.parse(document.getElementById("overlay-data").textContent);
+    const townsData = JSON.parse(document.getElementById("towns-data").textContent);
+    const countiesData = JSON.parse(document.getElementById("counties-data").textContent);
+    const rpcsData = JSON.parse(document.getElementById("rpcs-data").textContent);
+
     const map = L.map("map", { zoomControl: true }).setView([44.05, -72.7], 8);
     L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
       maxZoom: 19, attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
@@ -292,13 +337,47 @@ LEAFLET_TEMPLATE = """<!doctype html>
       d.innerHTML = '<strong>Growth Area Status</strong>'
         + '<div class="legend-row"><span class="swatch" style="background:'+colors.growth_no_tier1b+'"></span><span>Growth Area but no Tier 1B</span></div>'
         + '<div class="legend-row"><span class="swatch" style="background:'+colors.growth_pre_tier1b+'"></span><span>Growth Area with pre-application Tier 1B</span></div>'
-        + '<div class="legend-row"><span class="swatch" style="background:'+colors.growth_app_tier1b+'"></span><span>Growth Area with final application Tier 1B</span></div>';
+        + '<div class="legend-row"><span class="swatch" style="background:'+colors.growth_app_tier1b+'"></span><span>Growth Area with final application Tier 1B</span></div>'
+        + '<div class="sec"><strong>Reference Layers</strong></div>'
+        + '<div class="legend-row"><span class="swatch" style="background:transparent;border-color:var(--town-border)"></span><span>Town boundaries</span></div>'
+        + '<div class="legend-row"><span class="swatch" style="background:transparent;border-color:var(--county-border);border-width:2px"></span><span>County boundaries</span></div>'
+        + '<div class="legend-row"><span class="swatch" style="background:transparent;border-color:var(--rpc-border);border-width:2.5px"></span><span>RPC boundaries</span></div>';
       return d;
     };
     legend.addTo(map);
 
-    if (Object.keys(overlayLayers).length > 1) {
-      L.control.layers(null, overlayLayers, { position: "topright" }).addTo(map);
+    // Boundary reference layers (off by default)
+    const boundaryLayers = {};
+    function addBoundaryLayer(fc, label, style) {
+      if (!fc || !fc.features || fc.features.length === 0) return;
+      const layer = L.geoJSON(fc, {
+        style: style,
+        onEachFeature(f, fl) {
+          const p = f.properties || {};
+          fl.bindPopup('<div class="popup-title">' + esc(p.name||p.label||"") + '</div><div class="popup-grid"><span>Type</span><span>' + esc(p.label||"") + '</span><span>GEOID</span><span>' + esc(p.geoid||"") + '</span></div>');
+        }
+      });
+      boundaryLayers[label] = layer;
+      if (allBounds) allBounds.extend(layer.getBounds());
+    }
+
+    addBoundaryLayer(townsData, "Towns", {
+      color: "var(--town-border)", weight: 0.6, opacity: 0.7, fill: false
+    });
+    addBoundaryLayer(countiesData, "Counties", {
+      color: "var(--county-border)", weight: 1.4, opacity: 0.6, fill: false
+    });
+    addBoundaryLayer(rpcsData, "RPCs", {
+      color: "var(--rpc-border)", weight: 2.2, opacity: 0.5, fill: false
+    });
+
+    // Combine overlay and boundary layers for layer control
+    const allLayers = {};
+    Object.assign(allLayers, overlayLayers);
+    Object.assign(allLayers, boundaryLayers);
+
+    if (Object.keys(allLayers).length > 1) {
+      L.control.layers(null, allLayers, { position: "topright" }).addTo(map);
     }
 
     document.getElementById("fit").addEventListener("click", () => {
@@ -316,25 +395,50 @@ LEAFLET_TEMPLATE = """<!doctype html>
 """
 
 
-def write_leaflet(geojson_path, html_path):
+def write_leaflet(geojson_path, html_path, towns_fc, counties_fc, rpcs_fc):
     geojson = geojson_path.read_text()
     geojson = geojson.replace("</script", "<\\/script")
-    html_path.write_text(LEAFLET_TEMPLATE.replace("__GEOJSON__", geojson))
+
+    def dump(fc):
+        text = json.dumps(fc, separators=(",", ":"))
+        return text.replace("</script", "<\\/script")
+
+    html = (LEAFLET_TEMPLATE
+        .replace("__GEOJSON__", geojson)
+        .replace("__TOWNS__", dump(towns_fc))
+        .replace("__COUNTIES__", dump(counties_fc))
+        .replace("__RPCS__", dump(rpcs_fc))
+    )
+    html_path.write_text(html)
     print(f"wrote {html_path}")
 
 
 def main():
     config.OUT_DIR.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(config.DB_PATH))
 
-    overlay = build_overlay(conn)
-    conn.close()
+    overlay = build_overlay()
+
+    towns_fc = load_boundary_layer(
+        str(config.PARQUET_DIR / "boundary_towns.parquet"),
+        "Towns",
+        {"color": "#888", "weight": 0.6, "opacity": 0.7, "fill": False},
+    )
+    counties_fc = load_boundary_layer(
+        str(config.PARQUET_DIR / "boundary_counties.parquet"),
+        "Counties",
+        {"color": "#444", "weight": 1.4, "opacity": 0.6, "fill": False},
+    )
+    rpcs_fc = load_boundary_layer(
+        str(config.PARQUET_DIR / "boundary_rpcs.parquet"),
+        "RPCs",
+        {"color": "#222", "weight": 2.2, "opacity": 0.5, "fill": False},
+    )
 
     overlay_path = config.OUT_DIR / "growth_tier_overlay.geojson"
     html_path = config.OUT_DIR / "index.html"
 
     write_overlay(overlay, overlay_path)
-    write_leaflet(overlay_path, html_path)
+    write_leaflet(overlay_path, html_path, towns_fc, counties_fc, rpcs_fc)
     print("Done")
 
 
