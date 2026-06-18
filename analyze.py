@@ -201,8 +201,11 @@ def build_rpc_stats(duck):
         results.append({
             "code": code,
             "name": config.RPC_CODES.get(code, _name),
+            "growth_sq_mi": round(g_sq, 1) if code in has_growth else None,
             "growth_pct": round(g_sq / rpc_sq * 100, 1) if rpc_sq > 0 and code in has_growth else None,
+            "tier_pre_sq_mi": round(p_sq, 1) if code in has_pre else None,
             "tier_pre_pct": round(p_sq / rpc_sq * 100, 1) if rpc_sq > 0 and code in has_pre else None,
+            "tier_app_sq_mi": round(a_sq, 1) if code in has_app else None,
             "tier_app_pct": round(a_sq / rpc_sq * 100, 1) if rpc_sq > 0 and code in has_app else None,
         })
 
@@ -213,8 +216,11 @@ def build_rpc_stats(duck):
     results.append({
         "code": "VT",
         "name": "Statewide",
+        "growth_sq_mi": round(total_g, 1),
         "growth_pct": round(total_g / total_rpc * 100, 1) if total_rpc > 0 else None,
+        "tier_pre_sq_mi": round(total_p, 1),
         "tier_pre_pct": round(total_p / total_rpc * 100, 1) if total_rpc > 0 else None,
+        "tier_app_sq_mi": round(total_a, 1),
         "tier_app_pct": round(total_a / total_rpc * 100, 1) if total_rpc > 0 else None,
     })
 
@@ -246,6 +252,41 @@ def build_flu_tier_stats(duck):
 
     order = {c: i for i, c in enumerate(config.GROWTH_CODES)}
     results.sort(key=lambda r: (r["code"] == "ALL", order.get(r["code"], 99)))
+    return results
+
+
+def build_town_tier_stats(duck):
+    has_tier = duck.execute("SELECT COUNT(*) FROM statewide_tier").fetchone()[0] > 0
+    if not has_tier:
+        return []
+
+    rows = duck.execute("""
+        SELECT b.name, b.geoid,
+               ST_AsGeoJSON(b.geom) AS town_geojson,
+               ST_AsGeoJSON(ST_Intersection(b.geom, st.geom)) AS overlap_geojson
+        FROM boundary_areas b
+        CROSS JOIN statewide_tier st
+        WHERE b.boundary_type = 'town'
+    """).fetchall()
+
+    results = []
+    for name, geoid, town_json, overlap_json in rows:
+        if not town_json:
+            continue
+        town_gm = json.loads(town_json)
+        overlap_gm = json.loads(overlap_json) if overlap_json else None
+
+        town_sq = geodesic_sq_miles(town_gm)
+        overlap_sq = geodesic_sq_miles(overlap_gm)
+
+        results.append({
+            "name": name,
+            "geoid": geoid,
+            "total_sq_mi": round(town_sq, 2),
+            "tier1b_sq_mi": round(overlap_sq, 2),
+            "pct": round(overlap_sq / town_sq * 100, 1) if town_sq > 0 else 0.0,
+        })
+
     return results
 
 
@@ -285,9 +326,9 @@ LEAFLET_TEMPLATE = """<!doctype html>
     .toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: flex-end; }
     button { height: 34px; border: 1px solid var(--line); background: #fff; color: var(--ink); font: inherit; font-size: 13px; border-radius: 6px; padding: 0 11px; cursor: pointer; }
     button:hover { border-color: var(--accent); color: var(--accent-dark); }
-    #map-wrapper { position: relative; height: 55vh; max-width: 1100px; margin: 14px auto; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 6px rgba(0,0,0,0.1); }
+    #map-wrapper, #tier-map-wrapper { position: relative; height: 55vh; max-width: 1100px; margin: 14px auto; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 6px rgba(0,0,0,0.1); }
     #map-wrapper.fullscreen { position: fixed; inset: 0; z-index: 9999; height: 100vh; max-width: none; width: 100vw; border-radius: 0; margin: 0; }
-    #map { height: 100%; width: 100%; }
+    #map, #tier-map { height: 100%; width: 100%; }
     .leaflet-popup-content { margin: 10px 12px; min-width: 220px; }
     .popup-title { font-weight: 700; margin-bottom: 6px; }
     .popup-grid { display: grid; grid-template-columns: 82px minmax(0, 1fr); gap: 4px 10px; font-size: 13px; }
@@ -316,7 +357,7 @@ LEAFLET_TEMPLATE = """<!doctype html>
     @media (max-width: 760px) {
       header { grid-template-columns: 1fr; gap: 10px; }
       .toolbar { justify-content: flex-start; }
-      #map-wrapper { height: 40vh; margin: 10px; border-radius: 6px; }
+      #map-wrapper, #tier-map-wrapper { height: 40vh; margin: 10px; border-radius: 6px; }
       #rpc-table-wrap { padding: 0 10px; }
       #rpc-table-wrap th, #rpc-table-wrap td { padding: 8px 6px; font-size: 12px; }
     }
@@ -358,14 +399,19 @@ LEAFLET_TEMPLATE = """<!doctype html>
       <thead>
         <tr>
           <th>RPC</th>
-          <th>% in Growth Area</th>
-          <th>% in Tier 1B (Pre-App)</th>
-          <th>% in Tier 1B (Final App)</th>
+          <th>Growth Area (mi²)</th>
+          <th>Tier 1B (Pre-App) (mi²)</th>
+          <th>Tier 1B (Final App) (mi²)</th>
         </tr>
       </thead>
       <tbody id="rpc-tbody"></tbody>
       <tfoot id="rpc-tfoot"></tfoot>
     </table>
+  </section>
+  <section id="tier-choro-wrap" class="data-table-wrap">
+    <h2>Tier 1B Coverage by Municipality</h2>
+    <p style="font-size:13px;color:var(--muted);margin:0 0 12px;">Percentage of each town&rsquo;s land area with Tier&nbsp;1B designation (pre-app or final-app).</p>
+    <div class="map-wrapper" id="tier-map-wrapper"><div id="tier-map"></div></div>
   </section>
   <script id="overlay-data" type="application/json">__GEOJSON__</script>
   <script id="towns-data" type="application/json">__TOWNS__</script>
@@ -373,6 +419,7 @@ LEAFLET_TEMPLATE = """<!doctype html>
   <script id="rpcs-data" type="application/json">__RPCS__</script>
   <script id="rpc-stats-data" type="application/json">__RPC_STATS__</script>
   <script id="flu-tier-stats-data" type="application/json">__FLU_TIER_STATS__</script>
+  <script id="town-tier-stats-data" type="application/json">__TOWN_TIER_STATS__</script>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script>
     const data = JSON.parse(document.getElementById("overlay-data").textContent);
@@ -525,6 +572,12 @@ LEAFLET_TEMPLATE = """<!doctype html>
       return '<span class="num">' + fmtNumber(v, 1) + '%</span>';
     }
 
+    function sqmiPctCell(sqMi, pct) {
+      if (sqMi == null) return '<span class="blank">&mdash;</span>';
+      if (pct == null) return '<span class="num">' + fmtNumber(sqMi, 1) + 'mi²</span>';
+      return '<span class="num">' + fmtNumber(sqMi, 1) + 'mi² (' + fmtNumber(pct, 1) + '%)</span>';
+    }
+
     function renderRpcTable(stats) {
       const tbody = document.getElementById("rpc-tbody");
       const tfoot = document.getElementById("rpc-tfoot");
@@ -533,9 +586,9 @@ LEAFLET_TEMPLATE = """<!doctype html>
         const r = stats[i];
         const row = '<tr>'
           + '<td>' + esc(r.name) + '</td>'
-          + '<td>' + pctCell(r.growth_pct) + '</td>'
-          + '<td>' + pctCell(r.tier_pre_pct) + '</td>'
-          + '<td>' + pctCell(r.tier_app_pct) + '</td>'
+          + '<td>' + sqmiPctCell(r.growth_sq_mi, r.growth_pct) + '</td>'
+          + '<td>' + sqmiPctCell(r.tier_pre_sq_mi, r.tier_pre_pct) + '</td>'
+          + '<td>' + sqmiPctCell(r.tier_app_sq_mi, r.tier_app_pct) + '</td>'
           + '</tr>';
         if (r.code === "VT") {
         } else {
@@ -546,9 +599,9 @@ LEAFLET_TEMPLATE = """<!doctype html>
       const sw = stats[stats.length - 1];
       tfoot.innerHTML = '<tr>'
         + '<td>' + esc(sw.name) + '</td>'
-        + '<td>' + pctCell(sw.growth_pct) + '</td>'
-        + '<td>' + pctCell(sw.tier_pre_pct) + '</td>'
-        + '<td>' + pctCell(sw.tier_app_pct) + '</td>'
+        + '<td>' + sqmiPctCell(sw.growth_sq_mi, sw.growth_pct) + '</td>'
+        + '<td>' + sqmiPctCell(sw.tier_pre_sq_mi, sw.tier_pre_pct) + '</td>'
+        + '<td>' + sqmiPctCell(sw.tier_app_sq_mi, sw.tier_app_pct) + '</td>'
         + '</tr>';
     }
 
@@ -575,6 +628,74 @@ LEAFLET_TEMPLATE = """<!doctype html>
     }
 
     renderFluTierTable(fluTierStats);
+
+    function getTierColor(pct) {
+      return pct > 50 ? '#084594' :
+             pct > 25 ? '#2171b5' :
+             pct > 10 ? '#4292c6' :
+             pct > 5  ? '#6baed6' :
+             pct > 0  ? '#bdd7e7' :
+                        '#f7f7f7';
+    }
+
+    const townTierStats = JSON.parse(document.getElementById("town-tier-stats-data").textContent);
+    const townStatsByGeoid = {};
+    townTierStats.forEach(function(r) { townStatsByGeoid[r.geoid] = r; });
+
+    const tierMap = L.map("tier-map", { zoomControl: true }).setView([44.05, -72.7], 8);
+    L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      maxZoom: 19, attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+    }).addTo(tierMap);
+
+    const choroLayer = L.geoJSON(townsData, {
+      style: function(f) {
+        var s = townStatsByGeoid[f.properties.geoid];
+        var pct = s ? s.pct : 0;
+        return {
+          fillColor: getTierColor(pct),
+          weight: 0.8,
+          opacity: 0.6,
+          color: '#666',
+          fillOpacity: 0.75
+        };
+      },
+      onEachFeature: function(f, layer) {
+        var s = townStatsByGeoid[f.properties.geoid];
+        if (s) {
+          layer.bindPopup('<strong>' + esc(f.properties.name) + '</strong><br>'
+            + 'Tier 1B: ' + fmtNumber(s.tier1b_sq_mi, 2) + 'mi² (' + fmtNumber(s.pct, 2) + '%)');
+        }
+        layer.on({
+          mouseover: function(e) {
+            e.target.setStyle({ weight: 2, color: '#333', fillOpacity: 0.9 });
+            e.target.bringToFront();
+          },
+          mouseout: function(e) { choroLayer.resetStyle(e.target); }
+        });
+      }
+    }).addTo(tierMap);
+
+    var choroBounds;
+    if (choroLayer.getLayers().length > 0) {
+      choroBounds = choroLayer.getBounds();
+      if (choroBounds.isValid()) tierMap.fitBounds(choroBounds, { padding: [18, 18] });
+    }
+
+    var choroLegend = L.control({ position: "bottomright" });
+    choroLegend.onAdd = function() {
+      var div = L.DomUtil.create("div", "info");
+      div.innerHTML = '<strong>Tier 1B Coverage</strong>';
+      var grades = [0, 5, 10, 25, 50];
+      for (var i = 0; i < grades.length; i++) {
+        var from = grades[i];
+        var to = grades[i + 1];
+        var color = getTierColor(from + 0.01);
+        div.innerHTML += '<div class="legend-row"><span class="swatch" style="background:' + color + '"></span>'
+          + from + '%' + (to ? '&ndash;' + to + '%' : '+') + '</div>';
+      }
+      return div;
+    };
+    choroLegend.addTo(tierMap);
   </script>
 </body>
 </html>
@@ -593,7 +714,7 @@ def write_boundary_layer(layer, path):
     print(f"wrote {path}  ({len(layer['features'])} features)")
 
 
-def write_leaflet(geojson_path, html_path, towns_fc, counties_fc, rpcs_fc, rpc_stats, flu_tier_stats):
+def write_leaflet(geojson_path, html_path, towns_fc, counties_fc, rpcs_fc, rpc_stats, flu_tier_stats, town_tier_stats):
     geojson = geojson_path.read_text()
     geojson = geojson.replace("</script", "<\\/script")
 
@@ -603,6 +724,7 @@ def write_leaflet(geojson_path, html_path, towns_fc, counties_fc, rpcs_fc, rpc_s
 
     rpc_json = json.dumps(rpc_stats, separators=(",", ":"))
     flu_json = json.dumps(flu_tier_stats, separators=(",", ":"))
+    town_tier_json = json.dumps(town_tier_stats, separators=(",", ":"))
 
     html = (LEAFLET_TEMPLATE
         .replace("__GEOJSON__", geojson)
@@ -611,6 +733,7 @@ def write_leaflet(geojson_path, html_path, towns_fc, counties_fc, rpcs_fc, rpc_s
         .replace("__RPCS__", dump(rpcs_fc))
         .replace("__RPC_STATS__", rpc_json)
         .replace("__FLU_TIER_STATS__", flu_json)
+        .replace("__TOWN_TIER_STATS__", town_tier_json)
     )
     html_path.write_text(html)
     print(f"wrote {html_path}")
@@ -633,6 +756,7 @@ def main():
 
     rpc_stats = build_rpc_stats(duck)
     flu_tier_stats = build_flu_tier_stats(duck)
+    town_tier_stats = build_town_tier_stats(duck)
 
     duck.close()
 
@@ -640,7 +764,7 @@ def main():
     html_path = config.OUT_DIR / "index.html"
 
     write_overlay(overlay, overlay_path)
-    write_leaflet(overlay_path, html_path, towns_fc, counties_fc, rpcs_fc, rpc_stats, flu_tier_stats)
+    write_leaflet(overlay_path, html_path, towns_fc, counties_fc, rpcs_fc, rpc_stats, flu_tier_stats, town_tier_stats)
     print("Done")
 
 
