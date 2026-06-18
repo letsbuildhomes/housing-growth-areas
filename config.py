@@ -84,6 +84,14 @@ SOURCES = {
         "url": "https://services1.arcgis.com/BkFxaEFNwHqX3tAw/arcgis/rest/services/FS_VCGI_OPENDATA_Boundary_BNDHASH_poly_rpcs_SP_v1/FeatureServer/0",
         "domain": "boundary",
     },
+    "water_lakes": {
+        "url": "https://anrmaps.vermont.gov/arcgis/rest/services/Open_Data/OPENDATA_ANR_WATER_SP_NOCACHE_v2/MapServer/208",
+        "domain": "water",
+    },
+    "census_population": {
+        "url": "https://services1.arcgis.com/BkFxaEFNwHqX3tAw/arcgis/rest/services/FS_VCGI_Census2020CountySubdivision_WM_v1/FeatureServer/0",
+        "domain": "population",
+    },
 }
 
 TIER1B_SOURCES = {
@@ -225,6 +233,23 @@ FIELD_MAPS = {
         "RPC": "rpc_code",
         "SHORTNAME": "name",
     },
+    "water_lakes": {
+        "OBJECTID": "source_oid",
+        "Source": "source_name",
+        "WBID": "wbid",
+        "LAKEID": "lakeid",
+        "EventType": "event_type",
+        "GISAcres": "gis_acres",
+    },
+    "census_population": {
+        "OBJECTID": "source_oid",
+        "GEOID": "geoid",
+        "BASENAME": "name",
+        "P0010001": "total_pop",
+        "P0030001": "pop_18_over",
+        "H0010001": "housing_units",
+        "H0010002": "occupied_housing",
+    },
 }
 
 VERSION_NORMALIZE = {
@@ -301,4 +326,15 @@ TIER_COLUMNS = [
 BOUNDARY_COLUMNS = [
     "id", "geom", "boundary_type", "name", "geoid",
     "rpc_code", "source_layer", "source_oid",
+]
+
+WATER_COLUMNS = [
+    "id", "geom", "source_name", "wbid", "lakeid",
+    "event_type", "gis_acres", "source_layer", "source_oid",
+]
+
+POPULATION_COLUMNS = [
+    "id", "geoid", "name", "total_pop",
+    "pop_18_over", "housing_units", "occupied_housing",
+    "source_layer", "source_oid",
 ]

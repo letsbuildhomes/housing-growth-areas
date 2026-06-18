@@ -170,6 +170,62 @@ def build_boundary_rows(source_key, features, field_map):
     return rows
 
 
+def build_population_rows(source_key, features, field_map):
+    rows = []
+    for feat in features:
+        props = feat.get("properties") or {}
+        oid = props.get("OBJECTID", 0)
+        row = {
+            "id": f"{source_key}::{oid}",
+            "source_layer": source_key,
+        }
+        for src_field, tgt_field in field_map.items():
+            if tgt_field is None:
+                continue
+            if tgt_field == "source_oid":
+                row[tgt_field] = props.get(src_field)
+            else:
+                val = props.get(src_field)
+                if isinstance(val, str):
+                    val = val.strip() or None
+                row[tgt_field] = val
+        for c in config.POPULATION_COLUMNS:
+            if c not in row:
+                row[c] = None
+        rows.append(row)
+    return rows
+
+
+def build_water_rows(source_key, features, field_map):
+    rows = []
+    for feat in features:
+        geom = feat.get("geometry")
+        if not geom or not geom.get("type"):
+            continue
+        props = feat.get("properties") or {}
+        oid = props.get("OBJECTID", 0)
+        row = {
+            "id": f"{source_key}::{oid}",
+            "geom_json": json.dumps(geom),
+            "source_layer": source_key,
+        }
+        for src_field, tgt_field in field_map.items():
+            if tgt_field is None:
+                continue
+            if tgt_field == "source_oid":
+                row[tgt_field] = props.get(src_field)
+            else:
+                val = props.get(src_field)
+                if isinstance(val, str):
+                    val = val.strip() or None
+                row[tgt_field] = val
+        for c in config.WATER_COLUMNS:
+            if c not in row and c != "geom":
+                row[c] = None
+        rows.append(row)
+    return rows
+
+
 def bulk_load(duck, rows, table, columns):
     if not rows:
         return 0
@@ -212,6 +268,17 @@ CREATE_TABLES_SQL = [
         name VARCHAR, geoid VARCHAR, rpc_code VARCHAR, source_layer VARCHAR,
         source_oid BIGINT
     )""",
+    """CREATE TABLE IF NOT EXISTS water_areas (
+        id VARCHAR, geom GEOMETRY, source_name VARCHAR, wbid VARCHAR,
+        lakeid VARCHAR, event_type VARCHAR, gis_acres DOUBLE,
+        source_layer VARCHAR, source_oid BIGINT
+    )""",
+    """CREATE TABLE IF NOT EXISTS population (
+        id VARCHAR, geoid VARCHAR, name VARCHAR,
+        total_pop BIGINT, pop_18_over BIGINT,
+        housing_units BIGINT, occupied_housing BIGINT,
+        source_layer VARCHAR, source_oid BIGINT
+    )""",
 ]
 
 MATERIALIZATION_SQL = [
@@ -245,6 +312,21 @@ MATERIALIZATION_SQL = [
        FROM flu_areas
        WHERE flu_code IN ('DC','VC','VA','PGA')
        GROUP BY flu_code""",
+    # Water unions
+    """CREATE TABLE statewide_water AS
+       SELECT ST_Union_Agg(geom) AS geom FROM water_areas""",
+    """CREATE TABLE statewide_tier_water AS
+       SELECT ST_CollectionExtract(ST_Intersection(t.geom, w.geom), 3) AS geom
+       FROM statewide_tier t, statewide_water w""",
+    """CREATE TABLE statewide_growth_water AS
+       SELECT ST_CollectionExtract(ST_Intersection(g.geom, w.geom), 3) AS geom
+       FROM statewide_growth g, statewide_water w""",
+    """CREATE TABLE statewide_pre_water AS
+       SELECT ST_CollectionExtract(ST_Intersection(t.geom, w.geom), 3) AS geom
+       FROM statewide_pre t, statewide_water w""",
+    """CREATE TABLE statewide_app_water AS
+       SELECT ST_CollectionExtract(ST_Intersection(t.geom, w.geom), 3) AS geom
+       FROM statewide_app t, statewide_water w""",
 ]
 
 PRE_INTERSECT_SQL = [
@@ -253,20 +335,38 @@ PRE_INTERSECT_SQL = [
        SELECT r.name, r.rpc_code, r.geom AS rpc_geom,
               ST_Intersection(r.geom, g.geom) AS growth_geom,
               ST_Intersection(r.geom, p.geom) AS pre_geom,
-              ST_Intersection(r.geom, a.geom) AS app_geom
-       FROM boundary_areas r, statewide_growth g, statewide_pre p, statewide_app a
+              ST_Intersection(r.geom, a.geom) AS app_geom,
+              ST_CollectionExtract(ST_Intersection(r.geom, w.geom), 3) AS rpc_water_geom,
+              ST_CollectionExtract(ST_Intersection(r.geom, gw.geom), 3) AS growth_water_geom,
+              ST_CollectionExtract(ST_Intersection(r.geom, pw.geom), 3) AS pre_water_geom,
+              ST_CollectionExtract(ST_Intersection(r.geom, aw.geom), 3) AS app_water_geom
+       FROM boundary_areas r, statewide_growth g, statewide_pre p, statewide_app a,
+            statewide_water w, statewide_growth_water gw, statewide_pre_water pw, statewide_app_water aw
        WHERE r.boundary_type = 'rpc'""",
     # FLU-tier stats: each FLU code intersected with tier union
     """CREATE TABLE flu_tier_data AS
        SELECT f.flu_code, f.geom AS total_geom,
               COALESCE(ST_Intersection(f.geom, t.geom),
-                       ST_GeomFromText('GEOMETRYCOLLECTION EMPTY')) AS overlap_geom
-       FROM flu_code_unions f, statewide_tier t
+                       ST_GeomFromText('GEOMETRYCOLLECTION EMPTY')) AS overlap_geom,
+              ST_CollectionExtract(ST_Intersection(f.geom, w.geom), 3) AS total_water_geom,
+              ST_CollectionExtract(ST_Intersection(ST_Intersection(f.geom, t.geom), w.geom), 3) AS overlap_water_geom
+       FROM flu_code_unions f, statewide_tier t, statewide_water w
        UNION ALL
        SELECT 'ALL', g.geom,
               COALESCE(ST_Intersection(g.geom, t.geom),
-                       ST_GeomFromText('GEOMETRYCOLLECTION EMPTY'))
-       FROM statewide_growth g, statewide_tier t""",
+                       ST_GeomFromText('GEOMETRYCOLLECTION EMPTY')),
+              ST_CollectionExtract(ST_Intersection(g.geom, w.geom), 3),
+              ST_CollectionExtract(ST_Intersection(ST_Intersection(g.geom, t.geom), w.geom), 3)
+       FROM statewide_growth g, statewide_tier t, statewide_water w""",
+    # Town-tier-water stats: per-town tier overlap and water intersections
+    """CREATE TABLE town_tier_stats_data AS
+       SELECT b.name, b.geoid,
+              b.geom AS town_geom,
+              ST_CollectionExtract(ST_Intersection(b.geom, st.geom), 3) AS tier_overlap_geom,
+              ST_CollectionExtract(ST_Intersection(b.geom, w.geom), 3) AS water_geom,
+              ST_CollectionExtract(ST_Intersection(b.geom, tw.geom), 3) AS tier_water_geom
+       FROM boundary_areas b, statewide_tier st, statewide_water w, statewide_tier_water tw
+       WHERE b.boundary_type = 'town'""",
     # Full overlay: per-RPC growth split by tier status
     """CREATE TABLE overlay_results AS
        WITH rpc_app_overlap AS (
@@ -337,6 +437,14 @@ def main():
             rows = build_boundary_rows(source_key, features, field_map)
             n = bulk_load(duck, rows, "boundary_areas", config.BOUNDARY_COLUMNS)
             print(f"  {source_key}: {n} boundary_areas rows")
+        elif domain == "water":
+            rows = build_water_rows(source_key, features, field_map)
+            n = bulk_load(duck, rows, "water_areas", config.WATER_COLUMNS)
+            print(f"  {source_key}: {n} water_areas rows")
+        elif domain == "population":
+            rows = build_population_rows(source_key, features, field_map)
+            n = bulk_load(duck, rows, "population", config.POPULATION_COLUMNS)
+            print(f"  {source_key}: {n} population rows")
 
     flu_count = duck.execute("SELECT COUNT(*) FROM flu_areas").fetchone()[0]
     tier_count = duck.execute("SELECT COUNT(*) FROM tier_areas").fetchone()[0]
@@ -344,8 +452,9 @@ def main():
         "SELECT COUNT(*) FROM tier_areas WHERE source_layer = 'tier_consolidated' AND rpc = 'WR' AND version IS NULL"
     ).fetchone()[0]
     boundary_count = duck.execute("SELECT COUNT(*) FROM boundary_areas").fetchone()[0]
+    water_count = duck.execute("SELECT COUNT(*) FROM water_areas").fetchone()[0]
     print(f"\nSummary: {flu_count} flu areas, {tier_count} tier areas ({repair_count} WR repaired)")
-    print(f"         {boundary_count} boundary areas")
+    print(f"         {boundary_count} boundary areas, {water_count} water areas")
 
     # ── Validate geometries ──
     print("\n── Validating geometries ──")

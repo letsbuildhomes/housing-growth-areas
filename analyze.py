@@ -165,7 +165,9 @@ def build_rpc_stats(duck):
     rows = duck.execute("""
         SELECT name, rpc_code,
                ST_AsGeoJSON(rpc_geom), ST_AsGeoJSON(growth_geom),
-               ST_AsGeoJSON(pre_geom), ST_AsGeoJSON(app_geom)
+               ST_AsGeoJSON(pre_geom), ST_AsGeoJSON(app_geom),
+               ST_AsGeoJSON(rpc_water_geom), ST_AsGeoJSON(growth_water_geom),
+               ST_AsGeoJSON(pre_water_geom), ST_AsGeoJSON(app_water_geom)
         FROM rpc_stats_data
     """).fetchall()
 
@@ -182,31 +184,44 @@ def build_rpc_stats(duck):
     results = []
     sums = [0.0, 0.0, 0.0, 0.0]
 
-    for _name, code, rpc_gj, gj, pj, aj in rows:
+    for _name, code, rpc_gj, gj, pj, aj, rpc_w_gj, g_w_gj, p_w_gj, a_w_gj in rows:
         rpc_gm = json.loads(rpc_gj)
         g_gm = json.loads(gj)
         p_gm = json.loads(pj)
         a_gm = json.loads(aj)
+        rpc_w_gm = json.loads(rpc_w_gj) if rpc_w_gj else None
+        g_w_gm = json.loads(g_w_gj) if g_w_gj else None
+        p_w_gm = json.loads(p_w_gj) if p_w_gj else None
+        a_w_gm = json.loads(a_w_gj) if a_w_gj else None
 
         rpc_sq = geodesic_sq_miles(rpc_gm)
         g_sq = geodesic_sq_miles(g_gm)
         p_sq = geodesic_sq_miles(p_gm)
         a_sq = geodesic_sq_miles(a_gm)
+        rpc_water_sq = geodesic_sq_miles(rpc_w_gm)
+        g_water_sq = geodesic_sq_miles(g_w_gm)
+        p_water_sq = geodesic_sq_miles(p_w_gm)
+        a_water_sq = geodesic_sq_miles(a_w_gm)
 
-        sums[0] += rpc_sq
-        sums[1] += g_sq
-        sums[2] += p_sq
-        sums[3] += a_sq
+        rpc_land_sq = rpc_sq - rpc_water_sq
+        g_land_sq = g_sq - g_water_sq
+        p_land_sq = p_sq - p_water_sq
+        a_land_sq = a_sq - a_water_sq
+
+        sums[0] += rpc_land_sq
+        sums[1] += g_land_sq
+        sums[2] += p_land_sq
+        sums[3] += a_land_sq
 
         results.append({
             "code": code,
             "name": config.RPC_CODES.get(code, _name),
-            "growth_sq_mi": round(g_sq, 1) if code in has_growth else None,
-            "growth_pct": round(g_sq / rpc_sq * 100, 1) if rpc_sq > 0 and code in has_growth else None,
-            "tier_pre_sq_mi": round(p_sq, 1) if code in has_pre else None,
-            "tier_pre_pct": round(p_sq / rpc_sq * 100, 1) if rpc_sq > 0 and code in has_pre else None,
-            "tier_app_sq_mi": round(a_sq, 1) if code in has_app else None,
-            "tier_app_pct": round(a_sq / rpc_sq * 100, 1) if rpc_sq > 0 and code in has_app else None,
+            "growth_sq_mi": round(g_land_sq, 1) if code in has_growth else None,
+            "growth_pct": round(g_land_sq / rpc_land_sq * 100, 1) if rpc_land_sq > 0 and code in has_growth else None,
+            "tier_pre_sq_mi": round(p_land_sq, 1) if code in has_pre else None,
+            "tier_pre_pct": round(p_land_sq / rpc_land_sq * 100, 1) if rpc_land_sq > 0 and code in has_pre else None,
+            "tier_app_sq_mi": round(a_land_sq, 1) if code in has_app else None,
+            "tier_app_pct": round(a_land_sq / rpc_land_sq * 100, 1) if rpc_land_sq > 0 and code in has_app else None,
         })
 
     order = {c: i for i, c in enumerate(config.RPC_CODES)}
@@ -229,25 +244,34 @@ def build_rpc_stats(duck):
 
 def build_flu_tier_stats(duck):
     rows = duck.execute("""
-        SELECT flu_code, ST_AsGeoJSON(total_geom), ST_AsGeoJSON(overlap_geom)
+        SELECT flu_code,
+               ST_AsGeoJSON(total_geom), ST_AsGeoJSON(overlap_geom),
+               ST_AsGeoJSON(total_water_geom), ST_AsGeoJSON(overlap_water_geom)
         FROM flu_tier_data
     """).fetchall()
 
     results = []
-    for code, total_json, overlap_json in rows:
+    for code, total_json, overlap_json, total_w_json, overlap_w_json in rows:
         total_gm = json.loads(total_json)
         overlap_gm = json.loads(overlap_json)
+        total_w_gm = json.loads(total_w_json) if total_w_json else None
+        overlap_w_gm = json.loads(overlap_w_json) if overlap_w_json else None
 
         total_sq = geodesic_sq_miles(total_gm)
         overlap_sq = geodesic_sq_miles(overlap_gm)
+        total_water_sq = geodesic_sq_miles(total_w_gm)
+        overlap_water_sq = geodesic_sq_miles(overlap_w_gm)
+
+        total_land_sq = total_sq - total_water_sq
+        overlap_land_sq = overlap_sq - overlap_water_sq
 
         name = "All Growth Areas" if code == "ALL" else config.GROWTH_CODES.get(code, code)
         results.append({
             "code": code,
             "name": name,
-            "total_sq_mi": round(total_sq, 1),
-            "tier1b_sq_mi": round(overlap_sq, 1),
-            "pct": round(overlap_sq / total_sq * 100, 1) if total_sq > 0 else None,
+            "total_sq_mi": round(total_land_sq, 1),
+            "tier1b_sq_mi": round(overlap_land_sq, 1),
+            "pct": round(overlap_land_sq / total_land_sq * 100, 1) if total_land_sq > 0 else None,
         })
 
     order = {c: i for i, c in enumerate(config.GROWTH_CODES)}
@@ -261,30 +285,37 @@ def build_town_tier_stats(duck):
         return []
 
     rows = duck.execute("""
-        SELECT b.name, b.geoid,
-               ST_AsGeoJSON(b.geom) AS town_geojson,
-               ST_AsGeoJSON(ST_Intersection(b.geom, st.geom)) AS overlap_geojson
-        FROM boundary_areas b
-        CROSS JOIN statewide_tier st
-        WHERE b.boundary_type = 'town'
+        SELECT name, geoid,
+               ST_AsGeoJSON(town_geom),
+               ST_AsGeoJSON(tier_overlap_geom),
+               ST_AsGeoJSON(water_geom),
+               ST_AsGeoJSON(tier_water_geom)
+        FROM town_tier_stats_data
     """).fetchall()
 
     results = []
-    for name, geoid, town_json, overlap_json in rows:
+    for name, geoid, town_json, overlap_json, water_json, tier_water_json in rows:
         if not town_json:
             continue
         town_gm = json.loads(town_json)
         overlap_gm = json.loads(overlap_json) if overlap_json else None
+        water_gm = json.loads(water_json) if water_json else None
+        tier_water_gm = json.loads(tier_water_json) if tier_water_json else None
 
         town_sq = geodesic_sq_miles(town_gm)
         overlap_sq = geodesic_sq_miles(overlap_gm)
+        water_sq = geodesic_sq_miles(water_gm)
+        tier_water_sq = geodesic_sq_miles(tier_water_gm)
+
+        town_land_sq = town_sq - water_sq
+        overlap_land_sq = overlap_sq - tier_water_sq
 
         results.append({
             "name": name,
             "geoid": geoid,
-            "total_sq_mi": round(town_sq, 2),
-            "tier1b_sq_mi": round(overlap_sq, 2),
-            "pct": round(overlap_sq / town_sq * 100, 1) if town_sq > 0 else 0.0,
+            "total_sq_mi": round(town_land_sq, 2),
+            "tier1b_sq_mi": round(overlap_land_sq, 2),
+            "pct": round(overlap_land_sq / town_land_sq * 100, 1) if town_land_sq > 0 else 0.0,
         })
 
     return results
