@@ -133,13 +133,13 @@ def build_overlay(duck):
 
 def load_boundary_layer(duck, boundary_type, label, style):
     rows = duck.execute("""
-        SELECT name, geoid, source_layer, ST_AsGeoJSON(ST_Force2D(geom)) AS geojson
+        SELECT name, geoid, rpc_code, source_layer, ST_AsGeoJSON(ST_Force2D(geom)) AS geojson
         FROM boundary_areas
         WHERE boundary_type = ?
     """, [boundary_type]).fetchall()
 
     features = []
-    for name, geoid, source_layer, geojson_str in rows:
+    for name, geoid, rpc_code, source_layer, geojson_str in rows:
         if not geojson_str:
             continue
         features.append({
@@ -148,6 +148,7 @@ def load_boundary_layer(duck, boundary_type, label, style):
             "properties": {
                 "name": name or "",
                 "geoid": geoid or "",
+                "rpc_code": rpc_code or "",
                 "label": label,
                 "source_layer": source_layer or "",
             },
@@ -284,17 +285,35 @@ def build_town_tier_stats(duck):
     if not has_tier:
         return []
 
+    has_any_tier = {r[0] for r in duck.execute(
+        "SELECT DISTINCT rpc FROM tier_areas WHERE tier_code = '1B' AND rpc IS NOT NULL AND rpc != ''"
+    ).fetchall()}
+
+    town_rpc = dict(duck.execute("""
+        SELECT t.name, r.rpc_code
+        FROM boundary_areas t, boundary_areas r
+        WHERE t.boundary_type = 'town'
+          AND r.boundary_type = 'rpc'
+          AND ST_Intersects(t.geom, r.geom)
+        QUALIFY ROW_NUMBER() OVER (
+            PARTITION BY t.name
+            ORDER BY ST_Area(ST_Intersection(t.geom, r.geom)) DESC
+        ) = 1
+    """).fetchall())
+
     rows = duck.execute("""
-        SELECT name, geoid,
-               ST_AsGeoJSON(town_geom),
-               ST_AsGeoJSON(tier_overlap_geom),
-               ST_AsGeoJSON(water_geom),
-               ST_AsGeoJSON(tier_water_geom)
-        FROM town_tier_stats_data
+        SELECT t.name, t.geoid,
+               ST_AsGeoJSON(t.town_geom),
+               ST_AsGeoJSON(t.tier_overlap_geom),
+               ST_AsGeoJSON(t.water_geom),
+               ST_AsGeoJSON(t.tier_water_geom),
+               p.total_pop
+        FROM town_tier_stats_data t
+        LEFT JOIN population p ON t.geoid = p.geoid
     """).fetchall()
 
     results = []
-    for name, geoid, town_json, overlap_json, water_json, tier_water_json in rows:
+    for name, geoid, town_json, overlap_json, water_json, tier_water_json, total_pop in rows:
         if not town_json:
             continue
         town_gm = json.loads(town_json)
@@ -310,12 +329,16 @@ def build_town_tier_stats(duck):
         town_land_sq = town_sq - water_sq
         overlap_land_sq = overlap_sq - tier_water_sq
 
+        rpc = town_rpc.get(name)
+        has_data = rpc in has_any_tier
+
         results.append({
             "name": name,
             "geoid": geoid,
             "total_sq_mi": round(town_land_sq, 2),
-            "tier1b_sq_mi": round(overlap_land_sq, 2),
-            "pct": round(overlap_land_sq / town_land_sq * 100, 1) if town_land_sq > 0 else 0.0,
+            "tier1b_sq_mi": round(overlap_land_sq, 2) if has_data else None,
+            "pct": round(overlap_land_sq / town_land_sq * 100, 1) if town_land_sq > 0 and has_data else (0.0 if has_data else None),
+            "total_pop": total_pop,
         })
 
     return results
@@ -376,6 +399,13 @@ LEAFLET_TEMPLATE = """<!doctype html>
     #mid-stats .stat { min-width: 148px; padding: 7px 9px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); }
     .data-table-wrap { max-width: 1100px; margin: 14px auto; padding: 0 14px; }
     .data-table-wrap:last-of-type { margin-bottom: 40px; }
+    .side-by-side { display: flex; gap: 14px; max-width: 1100px; margin: 14px auto; }
+    .side-by-side .data-table-wrap { flex: 1; min-width: 0; margin: 0; }
+    .side-by-side .data-table-wrap:last-of-type { margin-bottom: 0; }
+    #tier-map-wrapper { height: 48vh; margin: 0; }
+    #scatter-inner { height: 48vh; display: flex; flex-direction: column; }
+    #scatter-inner > div:first-child { flex-shrink: 0; align-self: center; }
+    #scatter-inner canvas { width: 100% !important; }
     .data-table-wrap h2 { margin: 0 0 12px; font-size: 15px; font-weight: 680; }
     .data-table-wrap table { width: 100%; border-collapse: collapse; font-size: 13px; background: var(--panel); border-radius: 8px; box-shadow: 0 1px 6px rgba(0,0,0,0.1); overflow: hidden; }
     .data-table-wrap th, .data-table-wrap td { padding: 10px 14px; text-align: right; border-bottom: 1px solid var(--line); }
@@ -388,7 +418,10 @@ LEAFLET_TEMPLATE = """<!doctype html>
     @media (max-width: 760px) {
       header { grid-template-columns: 1fr; gap: 10px; }
       .toolbar { justify-content: flex-start; }
-      #map-wrapper, #tier-map-wrapper { height: 40vh; margin: 10px; border-radius: 6px; }
+      #map-wrapper { height: 40vh; margin: 10px; border-radius: 6px; }
+      .side-by-side { flex-direction: column; margin: 0 10px; }
+      .side-by-side .data-table-wrap { padding: 0; }
+      #tier-map-wrapper { height: 35vh; }
       #rpc-table-wrap { padding: 0 10px; }
       #rpc-table-wrap th, #rpc-table-wrap td { padding: 8px 6px; font-size: 12px; }
     }
@@ -404,10 +437,24 @@ LEAFLET_TEMPLATE = """<!doctype html>
   <main id="map-wrapper">
     <div id="map"></div>
   </main>
-  <div class="stats" id="mid-stats">
-    <div class="stat"><span class="stat-value" id="stat-total-growth">--</span><span class="stat-label">sq mi growth areas</span></div>
-    <div class="stat"><span class="stat-value" id="stat-tier-growth">--</span><span class="stat-label">sq mi growth area + any Tier 1B</span></div>
-    <div class="stat"><span class="stat-value" id="stat-tier-pct">--</span><span class="stat-label">growth area land mass with Tier 1B</span></div>
+  <div class="side-by-side">
+    <section id="tier-choro-wrap" class="data-table-wrap">
+      <h2>Tier 1B Coverage by Municipality</h2>
+      <p style="font-size:13px;color:var(--muted);margin:0 0 12px;">Percentage of each town&rsquo;s land area with Tier&nbsp;1B designation (pre-app or final-app).</p>
+      <div class="map-wrapper" id="tier-map-wrapper"><div id="tier-map"></div></div>
+      <p style="font-size:12px;color:var(--muted);margin:6px 0 0;text-align:center;">Unfilled towns are in an RPC with no Tier&nbsp;1B data.</p>
+    </section>
+    <section id="scatter-wrap" class="data-table-wrap">
+      <h2>Tier 1B Coverage vs. Population</h2>
+      <p style="font-size:13px;color:var(--muted);margin:0 0 12px;">Each dot is a municipality. Y-axis: percentage of town land area with Tier&nbsp;1B designation.</p>
+      <div id="scatter-inner">
+        <div style="display:inline-flex;border:1px solid var(--line);border-radius:6px;overflow:hidden;margin-bottom:10px;font-size:13px;">
+          <button class="scale-btn active" data-scale="logarithmic" style="border:none;background:var(--accent);color:#fff;padding:5px 14px;cursor:pointer;font:inherit;">Log</button>
+          <button class="scale-btn" data-scale="linear" style="border:none;background:#fff;color:var(--ink);padding:5px 14px;cursor:pointer;font:inherit;">Linear</button>
+        </div>
+        <canvas id="scatter-chart"></canvas>
+      </div>
+    </section>
   </div>
   <section id="flu-tier-wrap" class="data-table-wrap">
     <h2>Growth Area Designations Overlapping Tier 1B</h2>
@@ -439,11 +486,6 @@ LEAFLET_TEMPLATE = """<!doctype html>
       <tfoot id="rpc-tfoot"></tfoot>
     </table>
   </section>
-  <section id="tier-choro-wrap" class="data-table-wrap">
-    <h2>Tier 1B Coverage by Municipality</h2>
-    <p style="font-size:13px;color:var(--muted);margin:0 0 12px;">Percentage of each town&rsquo;s land area with Tier&nbsp;1B designation (pre-app or final-app).</p>
-    <div class="map-wrapper" id="tier-map-wrapper"><div id="tier-map"></div></div>
-  </section>
   <script id="overlay-data" type="application/json">__GEOJSON__</script>
   <script id="towns-data" type="application/json">__TOWNS__</script>
   <script id="counties-data" type="application/json">__COUNTIES__</script>
@@ -452,6 +494,7 @@ LEAFLET_TEMPLATE = """<!doctype html>
   <script id="flu-tier-stats-data" type="application/json">__FLU_TIER_STATS__</script>
   <script id="town-tier-stats-data" type="application/json">__TOWN_TIER_STATS__</script>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
   <script>
     const data = JSON.parse(document.getElementById("overlay-data").textContent);
     const townsData = JSON.parse(document.getElementById("towns-data").textContent);
@@ -550,6 +593,19 @@ LEAFLET_TEMPLATE = """<!doctype html>
       color: "var(--rpc-border)", weight: 2.2, opacity: 0.5, fill: false
     }, true);
 
+    var rpcsWithData = new Set();
+    data.features.forEach(function(f) {
+      if (f.properties && f.properties.rpc) rpcsWithData.add(f.properties.rpc);
+    });
+    var noDataRpcFeatures = rpcsData.features.filter(function(f) {
+      return f.properties.rpc_code && !rpcsWithData.has(f.properties.rpc_code);
+    });
+      if (noDataRpcFeatures.length > 0) {
+        L.geoJSON({ type: "FeatureCollection", features: noDataRpcFeatures }, {
+          style: { fillColor: "#888", fillOpacity: 0.35, weight: 0, color: "transparent" },
+      }).addTo(map);
+    }
+
     const allLayers = {};
     Object.assign(allLayers, overlayLayers);
     Object.assign(allLayers, boundaryLayers);
@@ -592,10 +648,6 @@ LEAFLET_TEMPLATE = """<!doctype html>
       }
     });
 
-    const s = (data.metadata||{}).area_stats||{};
-    document.getElementById("stat-total-growth").textContent = fmtNumber(s.total_growth_sq_mi, 1);
-    document.getElementById("stat-tier-growth").textContent = fmtNumber(s.growth_with_any_tier1b_sq_mi, 1);
-    document.getElementById("stat-tier-pct").textContent = fmtNumber(s.growth_with_any_tier1b_pct, 1) + "%";
     if (allBounds && allBounds.isValid()) map.fitBounds(allBounds, {padding:[18,18]});
 
     function pctCell(v) {
@@ -661,12 +713,13 @@ LEAFLET_TEMPLATE = """<!doctype html>
     renderFluTierTable(fluTierStats);
 
     function getTierColor(pct) {
+      if (pct == null) return null;
       return pct > 50 ? '#084594' :
              pct > 25 ? '#2171b5' :
              pct > 10 ? '#4292c6' :
              pct > 5  ? '#6baed6' :
              pct > 0  ? '#bdd7e7' :
-                        '#f7f7f7';
+                        '#fed2dd';
     }
 
     const townTierStats = JSON.parse(document.getElementById("town-tier-stats-data").textContent);
@@ -681,20 +734,25 @@ LEAFLET_TEMPLATE = """<!doctype html>
     const choroLayer = L.geoJSON(townsData, {
       style: function(f) {
         var s = townStatsByGeoid[f.properties.geoid];
-        var pct = s ? s.pct : 0;
+        var pct = s ? s.pct : null;
+        var color = getTierColor(pct);
         return {
-          fillColor: getTierColor(pct),
-          weight: 0.8,
-          opacity: 0.6,
-          color: '#666',
-          fillOpacity: 0.75
+          fillColor: color || '#f7f7f7',
+          weight: color ? 0.8 : 0.4,
+          opacity: color ? 0.6 : 0.3,
+          color: color ? '#666' : '#ccc',
+          fillOpacity: color ? 0.75 : 0,
         };
       },
       onEachFeature: function(f, layer) {
         var s = townStatsByGeoid[f.properties.geoid];
         if (s) {
-          layer.bindPopup('<strong>' + esc(f.properties.name) + '</strong><br>'
-            + 'Tier 1B: ' + fmtNumber(s.tier1b_sq_mi, 2) + 'mi² (' + fmtNumber(s.pct, 2) + '%)');
+          if (s.pct != null) {
+            layer.bindPopup('<strong>' + esc(f.properties.name) + '</strong><br>'
+              + 'Tier 1B: ' + fmtNumber(s.tier1b_sq_mi, 2) + 'mi² (' + fmtNumber(s.pct, 2) + '%)');
+          } else {
+            layer.bindPopup('<strong>' + esc(f.properties.name) + '</strong><br>No Tier 1B data');
+          }
         }
         layer.on({
           mouseover: function(e) {
@@ -704,6 +762,10 @@ LEAFLET_TEMPLATE = """<!doctype html>
           mouseout: function(e) { choroLayer.resetStyle(e.target); }
         });
       }
+    }).addTo(tierMap);
+
+    L.geoJSON(rpcsData, {
+      style: { color: "var(--rpc-border)", weight: 2.2, opacity: 0.5, fill: false }
     }).addTo(tierMap);
 
     var choroBounds;
@@ -716,17 +778,88 @@ LEAFLET_TEMPLATE = """<!doctype html>
     choroLegend.onAdd = function() {
       var div = L.DomUtil.create("div", "info");
       div.innerHTML = '<strong>Tier 1B Coverage</strong>';
+      div.innerHTML += '<div class="legend-row"><span class="swatch" style="background:' + getTierColor(0) + '"></span>0%</div>';
       var grades = [0, 5, 10, 25, 50];
       for (var i = 0; i < grades.length; i++) {
         var from = grades[i];
         var to = grades[i + 1];
         var color = getTierColor(from + 0.01);
-        div.innerHTML += '<div class="legend-row"><span class="swatch" style="background:' + color + '"></span>'
-          + from + '%' + (to ? '&ndash;' + to + '%' : '+') + '</div>';
+        var label;
+        if (from === 0) {
+          label = '&gt;0%&ndash;' + to + '%';
+        } else if (to) {
+          label = from + '%&ndash;' + to + '%';
+        } else {
+          label = from + '%+';
+        }
+        div.innerHTML += '<div class="legend-row"><span class="swatch" style="background:' + color + '"></span>' + label + '</div>';
       }
+
       return div;
     };
     choroLegend.addTo(tierMap);
+
+    var scatterData = townTierStats.filter(function(r) { return r.total_pop != null && r.pct != null; });
+    var scatterCtx = document.getElementById("scatter-chart").getContext("2d");
+    var scatterChart = new Chart(scatterCtx, {
+      type: "scatter",
+      data: {
+        datasets: [{
+          label: "Municipality",
+          data: scatterData.map(function(r) { return { x: r.total_pop, y: r.pct }; }),
+          backgroundColor: "#2171b5",
+          radius: 3.5,
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        scales: {
+          x: {
+            type: "logarithmic",
+            title: { display: true, text: "2020 Population" },
+            min: 10,
+            ticks: { callback: function(v) { return Number(v).toLocaleString(); } },
+          },
+          y: {
+            title: { display: true, text: "Land area with Tier 1B (%)" },
+            min: 0,
+            max: 100,
+          }
+        },
+        plugins: {
+          tooltip: {
+            callbacks: {
+              title: function(items) {
+                var i = items[0].dataIndex;
+                return scatterData[i].name;
+              },
+              label: function(item) {
+                return "Pop: " + Number(item.raw.x).toLocaleString() + ", Tier 1B: " + item.raw.y.toFixed(1) + "%";
+              }
+            }
+          },
+          legend: { display: false },
+        }
+      }
+    });
+    document.querySelectorAll(".scale-btn").forEach(function(btn) {
+      btn.addEventListener("click", function() {
+        document.querySelectorAll(".scale-btn").forEach(function(b) {
+          b.style.background = "#fff";
+          b.style.color = "var(--ink)";
+        });
+        this.style.background = "var(--accent)";
+        this.style.color = "#fff";
+        scatterChart.options.scales.x.type = this.dataset.scale;
+        if (this.dataset.scale === "logarithmic") {
+          scatterChart.options.scales.x.min = 10;
+        } else {
+          scatterChart.options.scales.x.min = 0;
+        }
+        scatterChart.update();
+      });
+    });
   </script>
 </body>
 </html>
