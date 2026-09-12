@@ -1,290 +1,389 @@
-# Vermont Act 181 — Future Land Use and Tier 1B Analysis
+# Vermont Act 181 data ingest
 
-Analyzes the spatial overlap between Act 181 growth areas (Downtown Center, Village Center, Village Area, Planned Growth Area) and proposed/approved Tier 1B designations across Vermont's 11 Regional Planning Commissions.
+Downloads the public interim exemption, future land use (FLU), Act 250 tier,
+municipal-boundary, and Regional Planning Commission (RPC) boundary geometries
+and attributes for Let's Build Homes. The default build exports the existing
+database into a static dashboard. Downloading/ingesting is a separate, explicit
+operation.
 
-## Pipeline
+The current dashboard combines a Leaflet map above the interim-area
+table. The map shows all interim polygons, municipality tint summaries, and RPC
+boundaries; later pre-built views can add additional map datasets without
+changing the ingest contract.
 
-```
-ArcGIS feature services ──→ extract.py ──→ in/*.geojson
-                                       (raw schema, one per source)
-in/*.geojson ──→ transform.py ──→ data/act181.duckdb
-                           (bulk JSON ingestion via DuckDB,
-                            field mapping, Windham repair,
-                            version/RPC normalization,
-                            FLU-shaped tier sources → tier_code="1B",
-                            geometry validation,
-                            R-tree indexes, materialized aggregates
-                            and pre-intersected analysis results)
-data/act181.duckdb ──→ analyze.py ──→ out/
-                              (reads pre-materialized tables,
-                               geodesic area via pyproj,
-                               growth_tier_overlay.geojson
-                               with per-RPC features,
-                               index.html with Leaflet map
-                               + boundary reference layers)
-```
+## Project guide
 
-## Quick start
+| Reference | What to find there |
+|---|---|
+| This README | Setup, daily commands, project layout, exports, and troubleshooting. |
+| [DATA_DICTIONARY.md](DATA_DICTIONARY.md) | All current database tables/views and column meanings. |
+| [SOURCE_INVENTORY.md](SOURCE_INVENTORY.md) | September 8, 2026 source counts, regional coverage, and known data irregularities. |
+| [AGENTS.md](AGENTS.md) | Working conventions for future coding sessions. |
+| [LEGACY_ANALYSIS.md](LEGACY_ANALYSIS.md) | Historical June overlay workflow; not the current dashboard. |
 
-```bash
+### Code and generated files
+
+| Path | Role |
+|---|---|
+| `Makefile` | Default build, export, preview, tests, and explicit ingest commands. |
+| `web/index.html` | Dashboard HTML template. |
+| `web/dashboard.css` / `web/dashboard.js` | Styling, grouped table rendering, and browser filters. |
+| `export_data.py` | Read-only database queries, grouping/sorting, and export registry. |
+| `build_dashboard.py` | Embeds exports, CSS, and JS into standalone HTML. |
+| `extract.py` | Current ingest command entry point; delegates to `ingest.py`. |
+| `ingest.py` | Capture orchestration, normalization, DuckDB tables/views, and snapshot restore. |
+| `ingest_sources.py` / `arcgis.py` | ArcGIS source discovery and verified downloads. |
+| `status.py` | Current database coverage and quality-flag summary. |
+| `config.py` | Shared normalization dictionaries plus legacy paths/settings. Its `DB_PATH` points to the **legacy** database; current ingest/export paths are defined in their own modules. |
+| `test_dashboard.py` / `test_ingest.py` | Export/build and ingest regression tests. |
+| `data/act181_ingest.duckdb` | Current research database, including successful captures. |
+| `in/snapshots/<timestamp>/` | Saved GeoJSON, metadata, map documents, and manifest for a capture. |
+| `out/dashboard/` | Generated static website and JSON exports. Edit the source files, not this directory. |
+| `legacy_extract.py`, `legacy_status.py`, `transform.py`, `analyze.py` | Original workflow using `in/*.geojson`, `data/act181.duckdb`, and legacy files in `out/`. |
+
+## Run
+
+Prerequisites: Python **3.9+**, `uv`, and `make`. Run commands from the repository
+root. `uv sync` installs the locked Python dependencies into `.venv`; no Node.js,
+npm, frontend framework, or ArcGIS credentials are required. First-time dependency
+and spatial-extension installation need network access; ordinary website builds
+use local data once the environment is set up.
+
+```sh
 uv sync
+make                              # export existing data + build static dashboard
+make serve                        # build, then preview at http://127.0.0.1:8000
+make status                       # current RPC/stage coverage and eligibility counts
+make test
+```
+
+Open `out/dashboard/index.html` directly, or use `make serve`. The HTML includes
+its data, styling, and JavaScript. Saved polygons and the table work offline;
+the OpenStreetMap street basemap loads online tiles with visible attribution.
+The map starts at step 1 of a three-step story: boundaries, designated areas,
+then likely exemption eligibility. Previous/next arrows preserve the map extent.
+On the last transition, likely ineligible areas turn red, then towns with no
+remaining likely eligible areas turn red. Previously excluded towns stay red.
+Reduced-motion preferences skip
+the animations. RPC boundaries retain their independent toggle.
+Step copy and legends live in `steps` in `web/dashboard.js`; ordered `groups`
+define the feature selections and style changes between chapters. The
+story panel combines navigation, title, description, and the current map key.
+It occupies a fixed 22rem column to the right of the map; below 44rem of map
+panel width, the map stacks above it. Copy and legend entries wrap naturally,
+and the panel grows with its content without an internal scroll area.
+Add chapter copy and legend entries to `steps` without changing the HTML layout.
+The reusable
+`web/story-animation.js` compiles these into a reversible timeline. One timing
+configuration controls phase duration (900 ms), gap ratio (0.5), and reverse
+speed (2). The first transition has three phases (3.6 seconds forward, 1.8 in
+reverse); the second has two (2.25 seconds forward, 1.125 in reverse).
+Changing direction mid-phase moves the same playhead back through
+the same easing curve without resetting styles or leaving stale timers.
+Test the timeline with `node --test test_story_animation.cjs` (Node.js required
+only for this animation test, not to build or run the dashboard).
+Hover over an interim area for its name, municipality, likely exemption status,
+and four reported criteria. Towns and RPC boundaries are noninteractive; there
+are no click popups. Hover criteria use the embedded table records matched by
+source feature ID, preserving Yes, No, and Unknown.
+Use View Vermont to reset the map extent. Scroll-wheel zoom is disabled to keep
+page scrolling smooth. No database server is needed. The local preview server
+is only serving files.
+
+Keep the preview process running while viewing the page; stop it with Ctrl+C.
+After editing source files, rebuild and reload the browser. There is no automatic
+watcher or live reload.
+
+### Everyday website work: no ingest required
+
+| Command | What it does |
+|---|---|
+| `make` / `make build` | Read the existing database, regenerate JSON exports, and build the page. |
+| `make export` | Regenerate website datasets only. |
+| `uv run python build_dashboard.py` | Rebuild HTML from existing exports after a page/style change; does not query the database. |
+| `make serve` | Build locally and serve `out/dashboard` on port 8000. |
+| `make clean` | Remove only generated `out/dashboard` files. Keeps databases and downloaded snapshots. |
+| `make rebuild` | Clean and rebuild only the dashboard. |
+| `make ingest` | **Explicitly download a fresh capture and load it.** Not a dependency of any website target. |
+
+Keep using the existing capture for this project. A missing database causes a
+clear build error; it never triggers a download automatically. On another
+computer, copy `data/act181_ingest.duckdb`, or restore a saved snapshot with the
+command below. A full ingest is necessary only when intentionally obtaining
+new source data or when no saved data is available.
+
+### Static dashboard and export contract
+
+The first page presents all 319 interim areas under their source municipality
+labels (currently 194 groups), with merged municipality cells. Sort order is
+municipality A–Z, then downtown district, village center + buffer, and
+town/growth center or development area; names are alphabetical within each type.
+Grouping normalizes whitespace/case but does not correct locality names or
+assign geographic municipalities. Yes, No, and Unknown have blue, red, and gray
+cells. Search and the eligibility/type filters update the groups and counts.
+
+```text
+data/act181_ingest.duckdb (read-only)
+  → export_data.py
+  → out/dashboard/data/manifest.json
+  → out/dashboard/data/interim-areas.json
+  → out/dashboard/data/map.json
+  → build_dashboard.py + web/{index.html,dashboard.css,dashboard.js}
+  → out/dashboard/index.html
+```
+
+Each dataset export includes `schema_version`, `snapshot_id`, `captured_at`,
+`exported_at`, `source_view`, and `source_urls`. `interim-areas.json` adds a
+`summary` and ordered `municipalities`, each containing its `municipality` label
+and `areas` array. Area records contain source IDs, name, municipality, category,
+exemption type, likely eligibility, and the four criteria as true/false/null.
+Geometry is intentionally omitted from this table dataset. `map.json` is a
+separate compact geometry export containing interim areas, municipality
+boundaries, RPC boundaries, and the spatially derived town-level eligibility
+summary used by the Leaflet map.
+
+To add a dataset, add an exporter to `EXPORTERS` in `export_data.py`. `make export`
+and `make build` automatically include registered exports and update the dataset
+manifest. Add a consumer in `web/` / `build_dashboard.py` when a page needs it.
+This keeps later website changes independent of ingestion. Rebuild the HTML
+after changing data exports, since the standalone page embeds its dataset.
+
+### Initial setup or an intentional data refresh
+
+```sh
+make ingest                       # network: discover, download, and load fresh data
+# equivalent: uv run python extract.py
+```
+
+The DuckDB spatial extension must be installed once for your DuckDB version:
+`uv run python -c "import duckdb; duckdb.connect().execute('INSTALL spatial')"`.
+It is already installed in this project's current environment.
+
+Each explicit ingest invocation rediscovers the maps and makes a fresh, dated capture. There is
+no implicit reuse of the old June cache. A completed capture is written to
+`in/snapshots/<UTC timestamp>/`; all successful captures are retained in
+`data/act181_ingest.duckdb`. To rebuild from an existing capture without network:
+
+```sh
+uv run python extract.py --snapshot in/snapshots/<UTC timestamp>
+# Optional: --db /path/to/another.duckdb; --workers 1 through 8 (default 4)
+```
+
+Reloading the same snapshot replaces that run transactionally; it does not
+duplicate it. Failed downloads or database loads exit unsuccessfully and leave
+the previous successful run available. An incomplete download has no manifest.
+`make clean` and `make rebuild` only affect the dashboard output; neither deletes
+captures/databases nor invokes ingestion.
+
+### Backups and moving to another computer
+
+**`in/`, `data/`, and `out/` are Git-ignored. A Git clone does not include the
+research data or the built dashboard.** Back up the current database and the
+completed snapshot directories separately. Stop any ingest/restore writer before
+copying the database so the copy represents a completed state.
+
+For a new machine, install dependencies with `uv sync`, install the DuckDB spatial
+extension for that environment, and either place a database copy at
+`data/act181_ingest.duckdb` or copy a complete snapshot and restore it:
+
+```sh
+# Replace the example directory with the snapshot you copied.
+uv run python extract.py --snapshot in/snapshots/20260908T190421.271250Z
 make
-# or step-by-step: make extract  →  make transform  →  make analyze
-make serve   # opens out/index.html at http://localhost:8000
-make status  # shows data coverage per RPC
 ```
 
-## Data sources
+Restoring the same snapshot is repeatable and uses no ArcGIS downloads. A copied
+database may contain old absolute `snapshot_path` references; copying/restoring
+the snapshot updates the restored run's path to its new location. Exporting the
+database does not require the original snapshot path to exist. Generated website
+files can always be rebuilt. To share just the dashboard, copy its standalone
+`index.html`, or serve the contents of `out/dashboard/` from a static host.
 
-13 ArcGIS feature services are queried:
+## Extending and checking the project
 
-### FLU and Tier
+For a page-only edit, change `web/`, run `uv run python build_dashboard.py`, and
+reload the preview. For a new data field or dataset, change `export_data.py`, add
+the corresponding page consumer, and run `make build`. Only modify ingestion
+when the saved source data actually lacks the required information. Many extra
+fields are already present in `raw_properties`.
 
-| Source | RPCs | Content |
-|---|---|---|
-| `flu_consolidated` | All 11 | FLU areas, PRE + APP versions (consolidated) |
-| `tier_consolidated` | All 11 | Tier 1B areas, PRE + APP (includes 443 WR orphans) |
-| `flu_nw_pre` | NW | NW pre-application FLU (not yet in consolidated) |
-| `flu_rr_pre` | RR | RR pre-application FLU |
-| `tier_nw_pre` | NW | NW pre-app Tier 1B (FLU-shaped → forced to tier) |
-| `tier_rr_pre` | RR | RR pre-app Tier 1B |
-| `tier_cc_pre` | CC | CC pre-app Tier 1B |
-| `tier_ac_pre` | AC | AC pre-app Tier 1B |
-| `tier_ma_pre` | MA | MA pre-app Tier 1B (has native TIER_AREA) |
-| `tier_lc_pre` | LC | LC pre-app Tier 1B (has native TIER_AREA) |
-
-### Boundaries (VCGI BNDHASH)
-
-| Source | Features | Content |
-|---|---|---|
-| `boundary_towns` | 256 | Vermont town/municipal boundaries |
-| `boundary_counties` | 14 | Vermont county boundaries |
-| `boundary_rpcs` | 11 | Vermont Regional Planning Commission boundaries |
-
-All three boundary layers come from VCGI's integrated BNDHASH dataset, which maintains vertically-integrated town/county/RPC boundaries. The `RPC` field in the RPC layer uses the same 2-letter codes as the rest of the pipeline.
-
-Sources with `_pre` suffix are per-RPC pre-application services that haven't been merged into the consolidated public service yet.
-
-## Storage format
-
-Everything lives in a single DuckDB database: `data/act181.duckdb`.
-
-The transform step reads GeoJSON features, writes them to temporary JSON files, and bulk-loads them into DuckDB using `read_json_auto` + `ST_GeomFromGeoJSON` in a single `INSERT...SELECT` per source. This avoids the memory leak that occurs with repeated `executemany` calls to `ST_GeomFromGeoJSON`.
-
-All geometry columns use DuckDB's native `GEOMETRY` type (not the CRS-annotated variant), which enables R-tree spatial indexes. The spatial extension is loaded at runtime via `LOAD spatial;`.
-
-### Raw tables
-
-Three tables hold the ingested data, with R-tree indexes on their geometry columns:
-
-- **`flu_areas`** — ~9,650 rows. Growth land use areas across 10 RPCs.
-- **`tier_areas`** — ~860 rows. Tier 1B designations across 9 RPCs.
-- **`boundary_areas`** — 281 rows. Town, county, and RPC boundaries from VCGI BNDHASH.
-
-### Materialized aggregation tables
-
-Pre-computed geometry unions, created once during transform:
-
-| Table | Rows | Content |
-|---|---|---|
-| `rpc_growth_union` | 10 | Per-RPC union of growth areas (DC/VC/VA/PGA) |
-| `rpc_tier_union` | ~15 | Per-RPC, per-version union of Tier 1B areas |
-| `rpc_tier_any` | ~10 | Per-RPC union of all Tier 1B regardless of version |
-| `statewide_growth` | 1 | Union of all growth areas statewide |
-| `statewide_tier` | 1 | Union of all Tier 1B statewide |
-| `statewide_pre` | 1 | Union of pre-app Tier 1B statewide |
-| `statewide_app` | 1 | Union of final-app Tier 1B statewide |
-| `flu_code_unions` | 4 | Statewide union per FLU code (DC/VC/VA/PGA) |
-
-### Pre-intersected result tables
-
-Analysis results computed once during transform, read in bulk by analyze.py:
-
-| Table | Rows | Content |
-|---|---|---|
-| `overlay_results` | 10 | Per-RPC growth split into app-overlap, pre-overlap, and no-tier |
-| `rpc_stats_data` | 11 | Each RPC boundary intersected with growth/pre/app statewide unions |
-| `flu_tier_data` | 5 | Each FLU code + ALL intersected with tier union |
-
-### Why materialize upfront
-
-The expensive spatial operations — `ST_Union_Agg` over thousands of polygons, `ST_Intersection` of statewide unions against RPC boundaries — run once during transform (~20s) instead of on every analyze run. This makes analyze nearly instant (~1.5s) and keeps ad-hoc queries fast against the pre-computed tables.
-
-## Normalized schemas
-
-All tables store geometry with a `source_layer` + `source_oid` provenance chain back to the origin service.
-
-**`flu_areas`** — ~9,650 records across 10 RPCs, 16 FLU codes.
-
-| Column | Source |
-|---|---|
-| `flu_code` | DC, VC, VA, PGA, RAF, RC, ... (non-standard codes preserved: RD, WA, X) |
-| `rpc` | Normalized to 2-letter code (AC, BC, CC, ...) |
-| `version` | Normalized to PRE / APP |
-| `geoid` | Town/village GEOID |
-| `desig_center_step` | 1 (Beginner), 2 (Intermediate), 3 (Advanced) |
-| `source_layer` | Which config source key this record came from |
-
-**`tier_areas`** — ~860 records, all Tier 1B, across 9 RPCs.
-
-| Column | Source |
-|---|---|
-| `tier_code` | 1B only |
-| `rpc` | Normalized to 2-letter code |
-| `version` | PRE / APP / NULL (443 Windham orphans have NULL) |
-| `submitter` | RPC, MUNI, or LURB |
-| `date_subm` | Date from submitter |
-
-**`boundary_areas`** — 281 records across 3 types.
-
-| Column | Source |
-|---|---|
-| `boundary_type` | `town`, `county`, or `rpc` |
-| `name` | Town name, county name, or RPC short name |
-| `geoid` | TOWNGEOID / CNTYGEOID / RPC code |
-| `rpc_code` | RPC 2-letter code (only populated for RPC boundaries) |
-
-## Windham orphan repair
-
-443 features in `tier_consolidated` were bulk-imported by the WR GIS user with all metadata fields blank. The repair step identifies them by fingerprint (blank RPC + blank TIER_VERS + blank SUBMITTER + `TIER_AREA="1B"` + creator `wrcgis`) and assigns `RPC="WR"`. Version is left as NULL since it can't be determined.
-
-## Key data notes
-
-- **CV** (Central Vermont) has zero data — no FLU or Tier contributions in any source.
-- **AC** has 50 Tier 1B pre-app features from their per-RPC service, but no APP data in consolidated.
-- Several per-RPC "Tier 1B" services use FLU-area codes (DC, VC, VA, PGA) instead of tier codes. These are accepted as Tier 1B data with `tier_code="1B"` forced at load — the FLU code describes the growth category of the proposed area, not the tier designation.
-- The tier/legend on the map lets you toggle between the three overlay categories (no tier, pre-app tier, final-app tier).
-
-## Make targets
-
-| Command | Action |
-|---|---|
-| `make` | extract → transform → analyze → status |
-| `make extract` | Download fresh data from ArcGIS (skips cached files) |
-| `make transform` | Ingest, validate, index, and materialize into `data/act181.duckdb` |
-| `make analyze` | Generate overlay GeoJSON + Leaflet map (uses DuckDB spatial) |
-| `make status` | Coverage table per RPC |
-| `make clean` | Remove all generated artifacts |
-| `make rebuild` | `make clean` + `make` |
-| `make serve` | Serve `out/` on http://localhost:8000 |
-
-## Adding new data sources
-
-The map data evolves as RPCs submit new pre-application or final-application layers. Here's how to discover and add them.
-
-### 1. Find new layer URLs
-
-Open the [ArcGIS web experience](https://experience.arcgis.com/experience/58543fd6882d4bd6bd0b3008d98e874e/page/Main-Map-Page) in a browser. Open developer tools (F12) → Network tab, then interact with the map (pan, zoom, toggle layers). Look for requests to URLs containing `/FeatureServer/` — these are the feature services. The layer hierarchy (which RPC, which version, which data type) is visible in the webmap's layer list in the left panel.
-
-Alternatively, the webmap JSON that powers the experience can be fetched directly — it lists every operational layer with its URL and definition expressions. The item ID is `509abf408c8a4e31964edefd997c1e84` (from `work/webmap_item.json`).
-
-### 2. Determine the domain
-
-Query the layer's metadata to see its fields:
-
-```bash
-# Replace URL with the new service
-curl 'https://services.example.com/.../FeatureServer/0?f=json'
-```
-
-Look for these field names to decide if it goes into `flu_areas` or `tier_areas`:
-
-| If it has | domain | table |
-|---|---|---|
-| `FLU_AREA`, `VERS_RPC`, `DESIG_CS` | `"flu"` | `flu_areas` |
-| `TIER_AREA`, `TIER_VERS`, `SUBMITTER` | `"tier"` | `tier_areas` |
-| `FLU_AREA` but NO `TIER_AREA` | `"tier"` with forced `tier_code="1B"` | `tier_areas` |
-
-The third case is common for per-RPC pre-application services — they use FLU-shaped schemas but represent Tier 1B proposals. Add them with `domain: "tier"` and the source key to `TIER1B_SOURCES` in `config.py`.
-
-### 3. Add the entry
-
-Two places in `config.py`:
+Exporter functions receive a read-only DuckDB connection and return a
+JSON-serializable object. Register them in `EXPORTERS`; include `title`,
+`source_view`, and `source_urls`, and preserve real boolean/null values. The
+export runner adds version and capture metadata. For example, the existing
+registration is:
 
 ```python
-# In SOURCES — pick a source_key like "{domain}_{rpc}_{version}"
-"tier_ac_pre": {
-    "url": "https://services8.arcgis.com/.../AC_TIER1B_PRE_poly_2026/FeatureServer/1",
-    "domain": "tier",
-},
-
-# In FIELD_MAPS — map source field names to target column names
-"tier_ac_pre": {
-    "OBJECTID": "source_oid",
-    "FLU_AREA": None,           # drop — domain="tier" with TIER1B_SOURCES forces "1B"
-    "NAME": "name",
-    "RPC": "rpc",
-    "NOTES": "notes",
-    "VERS_RPC": "version",
-    "DATE_RPC": "date_subm",
-},
+EXPORTERS = {'interim-areas': export_interim}
 ```
 
-For FLU-domain sources, map `FLU_AREA` → `flu_code`, `VERS_RPC` → `version`, etc. For tier-domain sources with a `TIER_AREA` field, map `TIER_AREA` → `tier_code`. For FLU-shaped tier sources (no `TIER_AREA`), set `FLU_AREA` → `None` and add the source key to `TIER1B_SOURCES` — the transform will set `tier_code="1B"` automatically.
+Update consumers when an export schema changes, and update the schema version
+when the shape is incompatible. The page builder currently accepts interim
+schema version 1. Keep geometry exports separate from lightweight table data.
 
-### 4. Test
+Run `make test` for logic changes. The tests cover ingest completeness and
+rollback, grouping/order, missing values, missing-database behavior, and safe
+HTML embedding. After changing exports, reconcile row counts and representative
+values against the source view. After changing rendering/filtering, check the
+page's merged cells, Yes/No/Unknown states, filters/reset, and horizontal scrolling.
+Documentation-only changes need link/command checks rather than a new ingest.
 
-```bash
-make clean && make
-make status
-```
+### Troubleshooting
 
-Check the status table to confirm the new RPC's data appears in the right columns.
+| Symptom | Next step |
+|---|---|
+| Missing database or no successful capture | Copy the saved database or restore a completed snapshot. Do not automatically run an ingest. |
+| Missing `spatial` extension/function | Install the extension once for the current DuckDB version; execute `LOAD spatial;` in SQL connections that use spatial functions. |
+| Missing export JSON when building the page | Run `make export`, or use `make build` to export and build together. |
+| Page still shows old content | Rebuild HTML and reload the browser. Updating JSON alone does not change an already embedded dataset. |
+| Port 8000 is occupied | Reuse the existing preview if it serves this dashboard, or use `python3 -m http.server 8001 --bind 127.0.0.1 -d out/dashboard` after building. |
+| DuckDB reports a conflicting writer lock | Let the ingest/restore finish and close other write connections before building. |
+| Snapshot checksum mismatch or absent manifest | Use an intact completed snapshot; do not edit checksums to accept changed or partial files. |
+| Criteria say Unknown or a town name looks unusual | Check `raw_properties` and the source inventory. Missing criteria and source locality labels are preserved intentionally. |
 
-## Querying the database
+## Sources and scope
 
-The DuckDB database is self-contained and queryable interactively. The spatial extension loads automatically on connect.
+The ingest resolves Experience Builder → web map → queryable ArcGIS REST layers:
 
-```bash
-duckdb data/act181.duckdb
-```
+- [Future Land Use & Tier 1A/B viewer](https://experience.arcgis.com/experience/58543fd6882d4bd6bd0b3008d98e874e/page/Main-Map-Page).
+- [Interim Act 250 viewer](https://experience.arcgis.com/experience/d96022b7dce64945a326e7bf98a2f365/).
+- [Approved FLU item](https://www.arcgis.com/home/item.html?id=bf09ba3367404b88933b55f31726ab81),
+  published by the same state organization but missing from the viewer's
+  approved group when inspected September 8, 2026. The item resolves the
+  current service URL; this additional source is explicit in `ingest_sources.py`.
+- [VT Data - Town Boundaries](https://geodata.vermont.gov/datasets/3f464b0e1980450e9026430a635bff0a),
+  the VCGI BNDHASH municipality layer (256 records when verified September 8, 2026).
+- [VT Data - RPC Boundaries](https://geodata.vermont.gov/datasets/b311ad21d306477eb2bbefa95fe6460d),
+  the matching BNDHASH Regional Planning Commission layer (11 records when verified).
 
-### Ad-hoc spatial queries
+The two boundary sources are resolved from their stable ArcGIS item IDs on each
+capture, then downloaded and checked with the same complete-ID, count, geometry,
+edit-time, snapshot, and checksum safeguards as the Act 181 sources. BNDHASH is
+VCGI's integrated general-mapping boundary dataset; the publisher explicitly
+states that it is not a legally definitive boundary source.
 
-The raw tables have R-tree indexes on their geometry columns, so spatial joins and filters are fast even without pre-materialization:
+Interim layers I–III are included: downtown districts; town/growth centers and
+development areas; village centers with their existing buffers. Layers IV–V
+(priority housing projects and urbanized transit buffers) are excluded.
+
+FLU and tier sources include both pre-application and application RPC layers,
+the approved tier service, and the approved FLU service. All FLU types are kept,
+including types outside DC/VC/VA/PGA. Hamlet point layers and the viewer's
+under-review Tier 1A source are also retained. Reference layers such as parcels,
+water infrastructure, flood zones, and basemaps are outside this ingest.
+
+RPC labels, stage groups, URLs, definition expressions, popups, renderers, and
+field metadata are saved. Layer visibility is ignored: a hidden layer can still
+contain requested data. Sources are downloaded once per distinct URL, even when
+many RPC/stage layers refer to them. The server evaluates each map filter to
+record exact feature membership. Empty map layers remain in the catalog with
+`feature_count = 0`.
+
+## Database
+
+See the **[table and column reference](DATA_DICTIONARY.md)** for every stored
+table's columns, types, meanings, view schemas, current row counts, and examples.
+
+| Table/view | Meaning |
+|---|---|
+| `ingest_runs` | Capture times, snapshot directory, manifest |
+| `ingest_sources` | Source URLs, counts, complete field/domain metadata, per run |
+| `ingest_features` | One feature per source URL + object ID + run, all runs |
+| `ingest_layers` | Map layer definitions, filters, stages, RPC context and counts, all runs |
+| `ingest_memberships` | Features belonging to each map layer, all runs |
+| `current_features` | Source features in the latest successful capture |
+| `current_layers` | Layer catalog in the latest successful capture |
+| `unmapped_features` | Current source records outside all selected map filters |
+| `map_features` | Current features with map stage, RPC, and layer membership |
+
+Mapping views expose separate logical layers:
+
+- `interim_areas`, plus `interim_downtown_district`,
+  `interim_town_growth_development`, and `interim_village_center_buffer`.
+- `tier1b_pre_application`, `tier1b_application`, `tier_approved`.
+- `flu_pre_application`, `flu_application`, `flu_approved`.
+- `hamlet_features` (points, with `map_stage`).
+- `municipal_boundaries` and `rpc_boundaries` (reference polygons, with
+  `map_stage = 'reference'`).
+
+`tier_approved` retains **all** approved tier types. Filter `tier_code = '1B'`
+when only Tier 1B is wanted. Stage-specific views follow the web map grouping;
+`APP` is a submission version and does not imply approval is pending.
+
+Every feature preserves:
+
+- `geom`: native DuckDB `GEOMETRY`, longitude/latitude WGS84 (EPSG:4326).
+- `geometry_geojson`: the returned GeoJSON geometry. No requested coordinate
+  rounding, simplification, splitting of multipart areas, union, or repair.
+- `geometry_valid`: spatial validity flag. Invalid and missing geometries are
+  retained and counted instead of silently dropped.
+- `raw_properties`: complete original attributes, including dates, notes,
+  source IDs, and fields without a normalized column.
+- `decoded_properties`: the same attributes with coded-value domain labels.
+- Convenient typed columns: RPC, name, municipality, GEOID, FLU/tier code,
+  submission version, LURB status/date, interim eligibility and criteria.
+
+`feature_id` combines a URL hash and object ID. It is a source identity, **not**
+a guaranteed permanent real-world area ID: publishers can republish services or
+renumber records. `source_globalid` is also retained when supplied. Copies in
+different services remain distinct, including overlaps between submitted and
+approved services. `map_features` may repeat a source feature across different
+map layers; use `current_features` for source-level counting.
+
+### Interim eligibility fields
+
+| Structured field | Source field |
+|---|---|
+| `likely_eligible` | `ExemptionApplied_Y_N_` |
+| `zoning_bylaws` | `ZoningAndSubdivisionBylaws` |
+| `drinking_water` | `Water`, or `DW_Status` for village buffers |
+| `sewer_wastewater` | `Sewer`, or `WW_Status` for village buffers |
+| `adequate_soils` | `AdequateSoils` |
+
+`Y`/`Yes` become true; `N`/`No` become false. Missing, blank, and unrecognized
+values become NULL, with the original values preserved in `raw_properties`.
+`criteria_fields` records which source fields exist, distinguishing an absent
+criterion from a present but empty one. The town/growth/development source has
+no zoning field. Eligibility is the **publisher's likely-eligibility label**;
+the pipeline does not recompute legal eligibility from the criteria.
 
 ```sql
--- Growth areas that intersect Tier 1B in Chittenden County
-SELECT f.id, f.flu_code, t.tier_code, t.version
-FROM flu_areas f, tier_areas t
-WHERE ST_Intersects(f.geom, t.geom)
-  AND f.rpc = 'CC' AND f.flu_code = 'DC';
+LOAD spatial;
 
--- Growth areas within ~100m of any Tier 1B boundary
-SELECT f.id, f.flu_code, f.rpc
-FROM flu_areas f, tier_areas t
-WHERE ST_DWithin(f.geom, t.geom, 0.001)
-  AND f.flu_code IN ('DC','VC','VA','PGA');
+SELECT name, municipality, likely_eligible,
+       zoning_bylaws, drinking_water, sewer_wastewater, adequate_soils,
+       ST_AsGeoJSON(geom) AS geometry
+FROM interim_areas;
 
--- How much growth area is within 500m of Tier 1B in a specific RPC?
-SELECT SUM(ST_Area_Spheroid(ST_Intersection(f.geom, ST_Buffer(t.geom, 0.005)))) / 2589988.11
-  AS growth_near_tier_sq_mi
-FROM flu_areas f, tier_areas t
-WHERE f.flu_code IN ('DC','VC','VA','PGA')
-  AND f.rpc = 'CC' AND t.tier_code = '1B';
+SELECT rpc, tier_code, lurb_status, date_lurb, ST_AsGeoJSON(geom)
+FROM tier_approved;
+
+-- Includes empty RPC/stage layers, which feature-only counts would omit.
+SELECT rpc, kind, stage, feature_count
+FROM current_layers
+WHERE kind IN ('flu', 'tier')
+ORDER BY rpc, kind, stage;
 ```
 
-### Pre-materialized tables
+## Completeness and interpretation
 
-For queries that match the pre-computed analysis, the materialized tables return instantly:
+Downloads enumerate object IDs, compare them to server counts, and request
+bounded ID batches with all fields and geometry. Truncated batches are split;
+missing or duplicate IDs fail the capture. IDs and available service edit
+timestamps are checked again for changes. This detects many concurrent edits,
+but the public services do not offer an atomic statewide historical snapshot.
+The manifest stores capture times and SHA-256 checksums of every source file.
 
-```sql
--- Full overlay results per RPC
-SELECT rpc, ST_AsGeoJSON(growth_geom) FROM overlay_results;
+The current application service can contain already approved records, and
+published geometry may have been edited in place. Downloading it today cannot
+recover the geometry exactly as originally submitted. Dated captures support
+future comparisons; historical comparisons require historical source versions.
+No cross-stage intersections or change metrics are computed here.
 
--- RPC-level area statistics
-SELECT name, rpc_code, ST_Area_Spheroid(growth_geom) / 2589988.11 AS growth_sq_mi
-FROM rpc_stats_data;
+The [September 8 source inventory](SOURCE_INVENTORY.md) records the first
+completed ingest's counts, published coverage, and geometry flags.
 
--- FLU code breakdown
-SELECT flu_code, ST_Area_Spheroid(overlap_geom) / 2589988.11 AS tier_sq_mi
-FROM flu_tier_data;
-```
-
-### Note on area calculations
-
-DuckDB's `ST_Area_Spheroid` returns incorrect values at Vermont latitudes (~41% of the true geodesic area). The analyze step uses pyproj's Karney geodesic algorithm for accurate area calculations. For ad-hoc queries where relative comparisons suffice, `ST_Area_Spheroid` still works — the error is consistent across features. For accurate absolute areas, extract the geometry as GeoJSON and compute with pyproj.
-
-## Dependencies
-
-Python ≥3.9, `pyproj`, `duckdb`. Managed via `uv` — `duckdb` has a pure-Python wheel with no system requirements. The spatial extension is loaded at runtime via DuckDB's extension mechanism (`INSTALL spatial; LOAD spatial;`), no host-side install needed.
+The original analysis remains documented in [LEGACY_ANALYSIS.md](LEGACY_ANALYSIS.md).
+`make legacy` runs it against the original cache and `data/act181.duckdb`;
+it does not use this new ingest database. The prior extractor is
+`legacy_extract.py`. The current dashboard uses the new ingest database.

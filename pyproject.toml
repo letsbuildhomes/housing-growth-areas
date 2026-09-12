@@ -1,7 +1,7 @@
 [project]
 name = "tier-1b"
 version = "0.1.0"
-description = "Vermont Act 181 — Future Land Use and Tier 1B analysis pipeline"
+description = "Vermont Act 181 — interim exemptions, future land use, and tier map ingestion"
 requires-python = ">=3.9"
 dependencies = [
     "pyproj>=3.0",

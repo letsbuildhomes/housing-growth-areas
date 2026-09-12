@@ -1,99 +1,35 @@
+"""Show coverage of the latest successfully ingested map layers."""
 import duckdb
-import config
-
-FLU_GROWTH_CODES = list(config.GROWTH_CODES)
+from ingest import DB_PATH
 
 
 def main():
-    duck = duckdb.connect(str(config.DB_PATH), read_only=True)
-    duck.execute("LOAD spatial;")
-
-    flu_by_rpc = {}
-    for row in duck.execute(
-        "SELECT rpc, version, COUNT(*) FROM flu_areas WHERE rpc IS NOT NULL AND rpc != '' GROUP BY rpc, version ORDER BY rpc, version"
-    ).fetchall():
-        rpc, version, count = row
-        flu_by_rpc.setdefault(rpc, {})[version or "?"] = count
-
-    flu_growth_by_rpc = {}
-    for row in duck.execute(
-        "SELECT rpc, version, COUNT(*) FROM flu_areas WHERE rpc IS NOT NULL AND rpc != '' AND flu_code IN ("
-        + ",".join("?" for _ in FLU_GROWTH_CODES)
-        + ") GROUP BY rpc, version ORDER BY rpc, version",
-        FLU_GROWTH_CODES,
-    ).fetchall():
-        rpc, version, count = row
-        flu_growth_by_rpc.setdefault(rpc, {})[version or "?"] = count
-
-    tier_by_rpc = {}
-    for row in duck.execute(
-        "SELECT rpc, version, COUNT(*) FROM tier_areas WHERE rpc IS NOT NULL AND rpc != '' AND tier_code = '1B' GROUP BY rpc, version ORDER BY rpc, version"
-    ).fetchall():
-        rpc, version, count = row
-        key = "PRE" if version == "PRE" else "APP" if version == "APP" else "?"
-        tier_by_rpc.setdefault(rpc, {})[key] = count
-
-    all_rpcs = sorted(
-        set(list(flu_by_rpc.keys()) + list(tier_by_rpc.keys()) + list(config.RPC_CODES.keys()))
-    )
-
-    total_flu = sum(sum(v.values()) for v in flu_by_rpc.values())
-    total_flu_growth = sum(sum(v.values()) for v in flu_growth_by_rpc.values())
-    total_tier_pre = sum(d.get("PRE", 0) for d in tier_by_rpc.values())
-    total_tier_app = sum(d.get("APP", 0) for d in tier_by_rpc.values())
-    total_tier_unk = sum(d.get("?", 0) for d in tier_by_rpc.values())
-
-    print()
-    print(f"  Data coverage by RPC ({total_flu} FLU, {total_flu_growth} growth, {total_tier_pre + total_tier_app + total_tier_unk} tier 1B)")
-    print(f"  {'─' * 52}")
-    print(f"  {'RPC':<5} {'FLU':<5} {'Growth':<8} {'Tier PRE':<9} {'Tier APP':<9} {'Tier ?':<8} {'Total T1B'}")
-    print(f"  {'─' * 52}")
-    for rpc in all_rpcs:
-        flu = "✓" if rpc in flu_by_rpc else ""
-        growth = "✓" if rpc in flu_growth_by_rpc else ""
-        tp = tier_by_rpc.get(rpc, {}).get("PRE", 0) or ""
-        ta = tier_by_rpc.get(rpc, {}).get("APP", 0) or ""
-        tu = tier_by_rpc.get(rpc, {}).get("?", 0) or ""
-        tt = (int(tp or 0) + int(ta or 0) + int(tu or 0)) or ""
-        print(f"  {rpc:<5} {flu:<5} {growth:<8} {str(tp):<9} {str(ta):<9} {str(tu):<8} {tt}")
-    print(f"  {'─' * 52}")
-    print(f"  Tier 1B summary: {total_tier_pre} pre, {total_tier_app} app, {total_tier_unk} unknown")
-    print(f"  FLU coverage: {sum(1 for r in flu_by_rpc)}/{len(all_rpcs)} RPCs  |  Growth: {sum(1 for r in flu_growth_by_rpc)}/{len(all_rpcs)}")
-    print()
-
-    print()
-    print(f"  Boundary data")
-    print(f"  {'─' * 52}")
-    boundary_counts = {}
-    for row in duck.execute(
-        "SELECT boundary_type, COUNT(*) FROM boundary_areas GROUP BY boundary_type ORDER BY boundary_type"
-    ).fetchall():
-        bt, cnt = row
-        boundary_counts[bt] = cnt
-    plural = {"town": "towns", "county": "counties", "rpc": "rpcs"}
-    for bt in ["town", "county", "rpc"]:
-        cnt = boundary_counts.get(bt, 0)
-        print(f"  {plural[bt]:<12} {cnt} features")
-
-    print()
-    print(f"  Database")
-    print(f"  {'─' * 52}")
-    db_size = config.DB_PATH.stat().st_size / (1024 * 1024)
-    print(f"  {config.DB_PATH.name:<20} {db_size:.0f} MB")
-
-    for table in ["flu_areas", "tier_areas", "boundary_areas"]:
-        cnt = duck.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-        print(f"  {table:<20} {cnt:>5} rows")
-
-    for table in ["rpc_growth_union", "rpc_tier_union", "overlay_results", "rpc_stats_data", "flu_tier_data"]:
-        try:
-            cnt = duck.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-            print(f"  {table:<20} {cnt:>5} rows (materialized)")
-        except Exception:
-            pass
-
-    duck.close()
+    if not DB_PATH.exists():
+        raise SystemExit('No ingest database yet. Run make ingest.')
+    with duckdb.connect(str(DB_PATH), read_only=True) as con:
+        run = con.execute('SELECT run_id, snapshot_path FROM latest_ingest_run').fetchone()
+        if run is None:
+            raise SystemExit('No successful ingest yet. Run make ingest.')
+        print(f'Snapshot: {run[0]}\nFiles: {run[1]}\nDatabase: {DB_PATH}\n')
+        print(f'{"RPC":<6} {"Kind":<10} {"Stage":<18} {"Features":>8}  Layer')
+        for rpc, kind, stage, count, path in con.execute('''
+            SELECT coalesce(rpc, '-'), kind, stage, feature_count, path
+            FROM current_layers ORDER BY kind, rpc, stage, layer_id''').fetchall():
+            print(f'{rpc:<6} {kind:<10} {stage:<18} {count:>8}  {path}')
+        print('\nInterim eligibility:')
+        for row in con.execute('''SELECT category, count(*),
+            count(*) FILTER (WHERE likely_eligible = true),
+            count(*) FILTER (WHERE likely_eligible = false),
+            count(*) FILTER (WHERE likely_eligible IS NULL)
+            FROM interim_areas GROUP BY category ORDER BY category''').fetchall():
+            print(f'  {row[0]}: {row[1]} total, {row[2]} likely eligible, '
+                  f'{row[3]} likely not eligible, {row[4]} unknown')
+        missing, invalid = con.execute('''SELECT count(*) FILTER (WHERE geom IS NULL),
+            count(*) FILTER (WHERE geometry_valid = false) FROM current_features''').fetchone()
+        unmapped = con.execute('SELECT count(*) FROM unmapped_features').fetchone()[0]
+        print(f'\nRetained source records: {missing} missing geometry, {invalid} invalid geometry; '
+              f'{unmapped} outside selected map filters.')
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
