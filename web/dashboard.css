@@ -36,14 +36,30 @@
 .story-progress span { width: 6px; height: 6px; background: #d5dee3; border-radius: 50%; transition: background .3s ease; }
 .story-progress .active { background: #397299; }
 .story-content { overflow-wrap: anywhere; padding: 0 var(--story-padding) 28px; }
-.story-position { font-size: 10px; letter-spacing: 1.3px; text-transform: uppercase; font-weight: 700; color: #397299; margin: 0 0 10px; }
 .story-copy h3 { font-size: 22px; line-height: 1.25; letter-spacing: -.3px; margin: 0 0 14px; }
 #story-description { font-size: 14px; line-height: 1.7; color: var(--muted); margin: 0; }
-.story-key { margin-top: 28px; padding-top: 22px; border-top: 1px solid var(--line); }
+.story-key { margin-top: 20px; }
 .story-key h4 { font-size: 11px; text-transform: uppercase; letter-spacing: 1px; margin: 0 0 14px; color: #4a5d6b; }
 .map-legend { display: grid; gap: 12px; font-size: 12px; line-height: 1.5; color: var(--muted); }
 .map-legend span { display: flex; align-items: flex-start; gap: 9px; }
 .map-swatch { flex: 0 0 10px; height: 10px; margin-top: 4px; display: inline-block; border-radius: 2px; }
+.story-stats { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px 16px; }
+.story-stat { display: grid; grid-template-columns: 28px 1fr; align-items: center; gap: 8px; }
+.stat-swatch { display: block; width: 28px; height: 36px; background: var(--stat-color); }
+.story-stat strong { display: block; font-size: 34px; line-height: 1.1; font-weight: 650; letter-spacing: -1px; font-variant-numeric: tabular-nums; }
+.story-stat span { grid-column: 1 / -1; display: block; font-size: 12px; line-height: 1.4; color: #344f60; }
+.story-stat:only-child { grid-column: 1 / -1; }
+.story-stat:last-child:nth-child(3) { grid-column: 1 / -1; display: flex; align-items: center; gap: 10px; padding-top: 16px; border-top: 1px solid var(--line); }
+.story-stat:last-child:nth-child(3) strong { font-size: 26px; }
+.story-stat:last-child:nth-child(3) span { margin-top: 0; }
+.story-stat:last-child:nth-child(3) .stat-swatch { width: 24px; height: 26px; flex-shrink: 0; }
+.story-area-key { margin-top: 24px; }
+.story-area-key > div { display: flex; flex-wrap: wrap; gap: 10px 14px; }
+.story-area-key span { display: flex; align-items: center; gap: 6px; font-size: 11px; color: #344f60; }
+.story-area-key i { width: 12px; height: 12px; display: block; }
+/* Desaturate only the basemap; data overlays keep their full color. */
+.map .leaflet-tile-pane { filter: grayscale(1); opacity: .5; }
+.rpc-line { display: inline-block; width: 18px; border-top: 2px solid #344d5b; }
 .map-actions {
   display: flex;
   align-items: center;

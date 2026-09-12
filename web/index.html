@@ -31,17 +31,18 @@
           </nav>
           <div class="story-content" aria-live="polite" aria-atomic="true">
             <div class="story-copy">
-              <p id="story-position" class="story-position"></p>
+              <p id="story-position" class="sr-only"></p>
               <h3 id="story-title"></h3>
               <p id="story-description"></p>
             </div>
             <div class="story-key">
-              <h4>Map key</h4>
-              <div id="map-legend" class="map-legend" aria-label="Map colors"></div>
+              <h4 id="story-stat-heading">Municipalities · map key</h4>
+              <div id="map-legend" class="story-stats" aria-labelledby="story-stat-heading"></div>
+              <div id="story-area-key" class="story-area-key" aria-label="Area polygon colors"></div>
             </div>
           </div>
           <div class="map-actions">
-            <label class="rpc-toggle"><input id="rpc-toggle" type="checkbox" checked>RPC boundaries</label>
+            <label class="rpc-toggle" title="Regional Planning Commission boundaries"><input id="rpc-toggle" type="checkbox" checked><i class="rpc-line" aria-hidden="true"></i>RPC boundaries<span class="sr-only"> (Regional Planning Commissions)</span></label>
             <button id="map-reset" type="button">View Vermont</button>
           </div>
         </section>
@@ -76,7 +77,7 @@
       <p>Eligibility reflects the publisher’s <strong>likely interim Act 250 exemption eligibility</strong>, not Tier 1B approval. Each row represents one published area. Unknown means the criterion is missing or not reported; it does not mean “No.”</p>
       <p>Municipality groups use the source’s labels, which can include locality names. Missing municipality labels would appear under “Unknown municipality.” The town/growth and development source does not include a zoning/bylaws field.</p>
       <p>These are the first three layers of the <a href="https://experience.arcgis.com/experience/d96022b7dce64945a326e7bf98a2f365/" target="_blank" rel="noopener noreferrer">Vermont interim Act 250 map</a>. The page uses a saved snapshot, not a live feed.</p>
-      <p>Faint town shading indicates whether a town intersects at least one likely eligible area (blue) or none (red). This is a spatial summary. Area colors reflect the publisher’s status. The street basemap requires internet access; saved boundaries, areas, and the table work offline.</p>
+      <p>In the final step, town shading indicates at least one likely eligible area (blue), designated areas but none likely eligible (red), or no designated areas (taupe). Counts describe municipalities intersecting the saved areas, not whole-town exemptions. Area polygons reflect the publisher’s status: blue for likely eligible, red for likely ineligible, gray for unknown. The street basemap requires internet access; saved boundaries, areas, and the table work offline.</p>
       <p class="source-meta" id="source-meta"></p>
     </div></details>
     <footer>Let’s Build Homes <span>Vermont · Housing data explorer</span></footer>

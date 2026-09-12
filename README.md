@@ -63,16 +63,24 @@ the OpenStreetMap street basemap loads online tiles with visible attribution.
 The map starts at step 1 of a three-step story: boundaries, designated areas,
 then likely exemption eligibility. Previous/next arrows preserve the map extent.
 On the last transition, likely ineligible areas turn red, then towns with no
-remaining likely eligible areas turn red. Previously excluded towns stay red.
+remaining likely eligible areas turn red. Towns with no designated areas stay taupe.
 Reduced-motion preferences skip
 the animations. RPC boundaries retain their independent toggle.
-Step copy and legends live in `steps` in `web/dashboard.js`; ordered `groups`
+Step copy and color-linked count cards live in `steps` in `web/dashboard.js`; ordered `groups`
 define the feature selections and style changes between chapters. The
 story panel combines navigation, title, description, and the current map key.
 It occupies a fixed 22rem column to the right of the map; below 44rem of map
 panel width, the map stacks above it. Copy and legend entries wrap naturally,
 and the panel grows with its content without an internal scroll area.
-Add chapter copy and legend entries to `steps` without changing the HTML layout.
+Add chapter copy, `stats: [{count, label, color}]`, and `areaKey: [[color, label]]` to `steps`
+without changing the HTML layout. Stats count geographic municipalities, not
+areas or source municipality labels. The final three groups partition all towns:
+with a likely eligible area, with designated areas but none likely eligible,
+and without designated areas. Large square swatches identify town colors;
+the compact polygon key identifies area colors. The RPC toggle includes its
+boundary line sample. Town fills use 60% opacity and area fills use 75%; the
+street basemap alone is grayscale at 50% opacity to reduce color interference.
+The step number remains available to screen readers.
 The reusable
 `web/story-animation.js` compiles these into a reversible timeline. One timing
 configuration controls phase duration (900 ms), gap ratio (0.5), and reverse

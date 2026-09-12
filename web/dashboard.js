@@ -74,22 +74,29 @@
         });
       }
     }).addTo(map);
-    const good = '#3b88b5', bad = '#c45a5d', muted = '#788992';
+    const good = '#3b88b5', bad = '#c45a5d', muted = '#788992', absent = '#a18e78';
+    const total = mapData.summary.municipalities;
     const designated = mapData.summary.towns_with_designated_area;
     const eligible = mapData.summary.towns_with_likely_eligible_area;
     // Chapter copy is separate from the phase groups that lead into each chapter.
     const steps = [
-      {title: 'Start with Vermont',
-        description: `${number(mapData.summary.municipalities)} municipalities across ${number(mapData.summary.rpcs)} regional planning commissions. This is the geographic starting point.`,
-        legend: [[muted, 'Town and RPC boundaries']],
+      {title: 'Vermont, town by town',
+        description: 'Start with the municipal boundaries that frame this story.',
+        stats: [{count: total, label: 'Municipalities', color: muted}],
+        areaKey: [],
       },
-      {title: 'Where are the designated areas?',
-        description: `${number(mapData.summary.areas)} interim designated areas intersect ${number(designated)} towns. Blue towns have at least one area; red towns have none.`,
-        legend: [[good, 'Has designated area'], [bad, 'No designated area']],
+      {title: 'Designated areas',
+        description: 'Some municipalities contain designated areas; others have none.',
+        stats: [{count: designated, label: 'With areas', color: good},
+          {count: total - designated, label: 'No areas', color: absent}],
+        areaKey: [[good, 'Designated areas']],
       },
-      {title: 'Which areas are likely exempt?',
-        description: `${number(eligible)} towns retain at least one likely eligible area. ${number(designated - eligible)} more turn red with none remaining. Towns without designated areas stay red. Area status follows the publisher’s likely interim Act 250 exemption eligibility.`,
-        legend: [[good, 'Likely eligible'], [bad, 'No likely eligible area'], [muted, 'Area eligibility unknown']],
+      {title: 'Likely exemptions',
+        description: 'Which municipalities have an area with likely interim Act 250 exemption eligibility?',
+        stats: [{count: eligible, label: 'Likely eligible area', color: good},
+          {count: designated - eligible, label: 'No likely eligible area', color: bad},
+          {count: total - designated, label: 'No designated areas', color: absent}],
+        areaKey: [[good, 'Likely eligible'], [bad, 'Likely ineligible'], [muted, 'Unknown']],
       },
     ];
     const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
@@ -99,9 +106,9 @@
       ? (typeof style === 'function' ? style(item.props) : style) : {};
     const groups = [
       [ // Boundaries → designated areas
-        phase('area', () => true, {opacity: 0.95, fillOpacity: 0.5}),
-        phase('town', p => p.has_designated_area, {fillColor: good, fillOpacity: 0.32}),
-        phase('town', p => !p.has_designated_area, {fillColor: bad, fillOpacity: 0.32}),
+        phase('area', () => true, {opacity: 1, fillOpacity: 0.75}),
+        phase('town', p => p.has_designated_area, {fillColor: good, fillOpacity: 0.6}),
+        phase('town', p => !p.has_designated_area, {fillColor: absent, fillOpacity: 0.6}),
       ],
       [ // Designated areas → likely exemption eligibility
         phase('area', p => p.likely_eligible !== true, p => ({color: areaColor(p.likely_eligible), fillColor: areaColor(p.likely_eligible)})),
@@ -110,7 +117,7 @@
     ];
     const initial = [];
     townLayer.eachLayer(layer => initial.push({layer, kind: 'town', props: layer.feature.properties,
-      style: {fillColor: layer.feature.properties.has_designated_area ? good : bad, fillOpacity: 0}}));
+      style: {fillColor: layer.feature.properties.has_designated_area ? good : absent, fillOpacity: 0}}));
     areaLayer.eachLayer(layer => initial.push({layer, kind: 'area', props: layer.feature.properties,
       style: {color: good, fillColor: good, opacity: 0, fillOpacity: 0}}));
     const timeline = MapStoryAnimation.compile(initial, groups);
@@ -131,8 +138,12 @@
       document.getElementById('story-position').textContent = `Step ${index + 1} of ${steps.length}`;
       document.getElementById('story-title').textContent = step.title;
       document.getElementById('story-description').textContent = step.description;
-      document.getElementById('map-legend').innerHTML = step.legend.map(([color, label]) =>
-        `<span><i class="map-swatch" style="background:${color}"></i>${label}</span>`).join('');
+      document.getElementById('map-legend').innerHTML = step.stats.map(({count, label, color}) =>
+        `<div class="story-stat" style="--stat-color:${color}"><i class="stat-swatch" aria-hidden="true"></i><strong>${number(count)}</strong><span>${escapeHTML(label)}</span></div>`).join('');
+      const areaKey = document.getElementById('story-area-key');
+      areaKey.hidden = !step.areaKey.length;
+      areaKey.innerHTML = step.areaKey.length ? `<h4>Area polygons</h4><div>${step.areaKey.map(([color, label]) =>
+        `<span><i style="background:${color}" aria-hidden="true"></i>${escapeHTML(label)}</span>`).join('')}</div>` : '';
       previous.disabled = index === 0;
       next.disabled = index === steps.length - 1;
       [...progress.children].forEach((dot, i) => dot.classList.toggle('active', i === index));
