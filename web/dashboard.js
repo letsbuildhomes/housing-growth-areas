@@ -18,7 +18,12 @@
   const escapeHTML = value => String(value ?? '').replace(/[&<>"']/g, character => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
   }[character]));
-  const areaColor = value => value === true ? '#3b88b5' : value === false ? '#c45a5d' : '#788992';
+  // CSS owns the brand and map palette; overlays and legend share the same values.
+  const theme = getComputedStyle(document.documentElement);
+  const themeColor = name => theme.getPropertyValue(name).trim();
+  const mapColors = {positive: themeColor('--map-positive'), negative: themeColor('--map-negative'),
+    unknown: themeColor('--map-unknown'), absent: themeColor('--map-absent')};
+  const areaColor = value => value === true ? mapColors.positive : value === false ? mapColors.negative : mapColors.unknown;
   const areaDetails = new Map(data.municipalities.flatMap(group =>
     group.areas.map(area => [area.feature_id, area])));
   const criteria = [
@@ -29,13 +34,19 @@
     const details = areaDetails.get(props.feature_id) || props;
     const state = status(props.likely_eligible);
     const determination = state === 'yes' ? 'Likely Exempt' : state === 'no' ? 'Likely Not Exempt' : 'Exemption Unknown';
+    const criterionRow = ([field, label]) => {
+      const value = status(details[field]);
+      return `<tr><th scope="row">${label}</th><td class="${value}">${value === 'yes' ? 'Yes' : value === 'no' ? 'No' : 'Unknown'}</td></tr>`;
+    };
+    const infrastructure = status(EligibilityDisplay.infrastructure(details));
     return `<strong class="area-hover-name">${escapeHTML(props.name || props.category || 'Interim area')}</strong>
       <div class="area-hover-town">${escapeHTML(displayMunicipality(props.municipality || 'Unknown municipality'))}</div>
+      <div class="area-hover-type">${escapeHTML(details.exemption_type || details.category_label || props.category)}</div>
       <div class="area-hover-status ${state}">${determination}</div>
-      <table class="area-hover-criteria" aria-label="Reported eligibility criteria"><tbody>${criteria.map(([field, label]) => {
-        const value = status(details[field]);
-        return `<tr><th scope="row">${label}</th><td class="${value}">${value === 'yes' ? 'Yes' : value === 'no' ? 'No' : 'Unknown'}</td></tr>`;
-      }).join('')}</tbody></table>`;
+      <small class="publisher-label">Publisher-reported</small>
+      ${EligibilityDisplay.zoningApplies(details) ? `<table class="area-hover-criteria" aria-label="Zoning requirement"><tbody>${criterionRow(criteria[0])}</tbody></table>` : ''}
+      <div class="infrastructure-heading"><strong>Infrastructure · any one</strong><span class="${infrastructure}">${infrastructure === 'yes' ? 'Met' : infrastructure === 'no' ? 'Not met' : 'Unknown'}</span></div>
+      <table class="area-hover-criteria" aria-label="Infrastructure alternatives"><tbody>${criteria.slice(1).map(criterionRow).join('')}</tbody></table>`;
   }
 
   function initMap() {
@@ -52,7 +63,7 @@
     basemap.addTo(map);
     const townLayer = L.geoJSON(mapData.towns, {
       interactive: false,
-      style: feature => ({color: '#8297a3', weight: 0.65, opacity: 0.62,
+      style: feature => ({color: '#536c70', weight: 1, opacity: 0.85,
         fillColor: '#788992', fillOpacity: 0}),
     }).addTo(map);
     map.createPane('rpcBoundaries');
@@ -60,7 +71,7 @@
     map.getPane('rpcBoundaries').style.pointerEvents = 'none';
     const rpcLayer = L.geoJSON(mapData.rpcs, {
       pane: 'rpcBoundaries', interactive: false,
-      style: {color: '#344d5b', weight: 1.6, opacity: 0.8, fill: false},
+      style: {color: themeColor('--brand-green'), weight: 1.6, opacity: 0.8, fill: false},
     }).addTo(map);
     map.createPane('storyAreas');
     map.getPane('storyAreas').style.zIndex = 440;
@@ -74,7 +85,7 @@
         });
       }
     }).addTo(map);
-    const good = '#3b88b5', bad = '#c45a5d', muted = '#788992', absent = '#a18e78';
+    const {positive: good, negative: bad, unknown: muted, absent} = mapColors;
     const total = mapData.summary.municipalities;
     const designated = mapData.summary.towns_with_designated_area;
     const eligible = mapData.summary.towns_with_likely_eligible_area;
@@ -210,6 +221,11 @@
           const state = status(area[field]);
           cell.className = `boolean ${state}${index === 0 ? ' eligibility' : ''}`;
           cell.textContent = state === 'yes' ? 'Yes' : state === 'no' ? 'No' : 'Unknown';
+          if (field === 'zoning_bylaws' && !EligibilityDisplay.zoningApplies(area)) {
+            cell.className = 'boolean not-required';
+            cell.textContent = 'Not separately required';
+            cell.title = 'Not a separate condition in the town/growth/development exemption clause; source zoning value remains unreported.';
+          }
           row.append(cell);
         });
         body.append(row);

@@ -4,23 +4,23 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="description" content="Explore Vermont's interim Act 250 exemption areas, municipal boundaries, RPC boundaries, and reported eligibility criteria.">
-  <title>Interim exemptions · Let's Build Homes</title>
+  <title>Act 181 implementation · Let's Build Homes</title>
   <style>{{LEAFLET_CSS}}</style>
   <style>{{STYLES}}</style>
 </head>
 <body>
   <header class="masthead">
-    <div class="brand"><span class="brand-mark" aria-hidden="true">⌂</span> Let’s Build Homes</div>
+    <a class="brand" href="https://reports.letsbuildhomes.org/" aria-label="Let's Build Homes reports"><img class="brand-logo" src="{{LOGO}}" alt="Let's Build Homes" width="150" height="55"></a>
     <span class="project-label">Vermont housing policy <span>/</span> Data explorer</span>
   </header>
   <main>
     <div class="page-heading">
-      <div><p class="eyebrow">Act 250 · Map + table</p><h1>Interim exemption areas</h1>
+      <div><p class="eyebrow">Vermont · Map + table</p><h1>Act 181 implementation</h1>
         <p class="intro">Explore likely exemption eligibility and the criteria reported for each area.</p></div>
       <p class="capture">Source snapshot <strong id="capture-date">—</strong></p>
     </div>
     <section class="map-panel" aria-label="Map of interim exemption areas and Vermont boundaries">
-      <div class="map-heading"><div><p class="eyebrow">Spatial view</p><h2>Interim areas across Vermont</h2></div><p class="map-summary" id="map-summary">—</p></div>
+      <div class="map-heading"><div><p class="eyebrow">Spatial view</p><h2>Act 250 exemption areas across Vermont</h2></div><p class="map-summary" id="map-summary">—</p></div>
       <div class="map-layout">
         <div id="map" class="map" role="region" aria-label="Interactive map of Vermont interim areas, towns, and regional planning commissions"></div>
         <section class="map-story" aria-label="Map story">
@@ -49,12 +49,6 @@
       </div>
       <p id="basemap-status" class="basemap-status" role="status" hidden>Street map unavailable. Saved area and boundary layers remain visible.</p>
     </section>
-    <section class="summary" aria-label="Filtered dataset summary">
-      <div><span class="stat-number" id="area-count">—</span><span class="stat-label">Interim areas</span></div>
-      <div><span class="stat-number" id="municipality-count">—</span><span class="stat-label">Municipality groups</span></div>
-      <div><span class="stat-number blue" id="yes-count">—</span><span class="stat-label">Likely eligible</span></div>
-      <div><span class="stat-number red" id="no-count">—</span><span class="stat-label">Likely not eligible</span></div>
-    </section>
     <section class="table-panel" aria-label="Interim areas by municipality">
       <form class="toolbar" id="filters" role="search">
         <div class="search-control"><label for="search">Find a municipality or area</label><input id="search" type="search" placeholder="Search by name…" autocomplete="off"></div>
@@ -62,12 +56,21 @@
         <div><label for="category">Area type</label><select id="category"><option value="all">All area types</option><option value="downtown_district">Downtown districts</option><option value="village_center_buffer">Village centers + buffer</option><option value="town_growth_development">Town/growth & development</option></select></div>
         <button type="reset" id="reset">Reset filters</button>
       </form>
+      <section class="summary" aria-label="Filtered dataset summary">
+        <div><span class="stat-number" id="area-count">—</span><span class="stat-label">Interim areas</span></div>
+        <div><span class="stat-number" id="municipality-count">—</span><span class="stat-label">Municipality groups</span></div>
+        <div><span class="stat-number blue" id="yes-count">—</span><span class="stat-label">Likely eligible</span></div>
+        <div><span class="stat-number red" id="no-count">—</span><span class="stat-label">Likely not eligible</span></div>
+      </section>
       <div class="table-context"><p id="results" role="status" aria-live="polite"></p><div class="legend" aria-label="Cell colors"><span><i class="yes"></i> Yes</span><span><i class="no"></i> No</span><span><i class="unknown"></i> Unknown</span></div></div>
       <div class="table-scroll" tabindex="0" role="region" aria-label="Scrollable interim areas table">
         <table id="areas-table">
           <caption class="sr-only">Municipalities A to Z. Within each municipality: downtown districts, village centers, then town/growth centers and development areas; alphabetically within each type.</caption>
           <colgroup><col class="municipality-col"><col class="area-col"><col class="eligibility-col"><col><col><col><col></colgroup>
-          <thead><tr><th scope="col">Municipality <span aria-hidden="true">↓</span></th><th scope="col">Interim area</th><th scope="col">Likely exemption<br>eligible</th><th scope="col">Zoning /<br>bylaws</th><th scope="col">Drinking<br>water</th><th scope="col">Sewer /<br>wastewater</th><th scope="col">Adequate<br>soils</th></tr></thead>
+          <thead>
+            <tr><th scope="col" rowspan="2">Municipality <span aria-hidden="true">↓</span></th><th scope="col" rowspan="2">Interim area</th><th scope="col" rowspan="2" class="eligibility-heading">Likely exemption<br>eligible<small>Publisher-reported</small></th><th scope="col" class="criteria-heading">Zoning &amp; bylaws</th><th scope="colgroup" colspan="3" class="criteria-heading">Infrastructure · any one</th></tr>
+            <tr><th scope="col"><small>Downtowns / village centers</small></th><th scope="col">Drinking water</th><th scope="col">Sewer / wastewater</th><th scope="col">Adequate soils</th></tr>
+          </thead>
         </table>
         <div id="empty" hidden><h2>No matching areas</h2><p>Try another name or reset the filters.</p></div>
       </div>
@@ -75,9 +78,9 @@
     </section>
     <details class="source-details"><summary>About this data</summary><div>
       <p>Eligibility reflects the publisher’s <strong>likely interim Act 250 exemption eligibility</strong>, not Tier 1B approval. Each row represents one published area. Unknown means the criterion is missing or not reported; it does not mean “No.”</p>
-      <p>Municipality groups use the source’s labels, which can include locality names. Missing municipality labels would appear under “Unknown municipality.” The town/growth and development source does not include a zoning/bylaws field.</p>
+      <p>Municipality groups use the source’s labels, which can include locality names. Missing municipality labels would appear under “Unknown municipality.” For new town centers, growth centers, and neighborhood development areas, zoning is shown as “Not separately required” because it is not stated as a separate condition in their exemption clause; this does not mean there are no zoning obligations. The source zoning value remains unreported. Infrastructure is summarized as met when any reported alternative is Yes, not met when all are No, and Unknown otherwise. These display groupings do not recalculate publisher eligibility or evaluate every project-specific requirement.</p>
       <p>These are the first three layers of the <a href="https://experience.arcgis.com/experience/d96022b7dce64945a326e7bf98a2f365/" target="_blank" rel="noopener noreferrer">Vermont interim Act 250 map</a>. The page uses a saved snapshot, not a live feed.</p>
-      <p>In the final step, town shading indicates at least one likely eligible area (blue), designated areas but none likely eligible (red), or no designated areas (taupe). Counts describe municipalities intersecting the saved areas, not whole-town exemptions. Area polygons reflect the publisher’s status: blue for likely eligible, red for likely ineligible, gray for unknown. The street basemap requires internet access; saved boundaries, areas, and the table work offline.</p>
+      <p>In the final step, town shading indicates at least one likely eligible area (teal), designated areas but none likely eligible (coral), or no designated areas (taupe). Counts use recorded municipality membership with a reviewed name crosswalk, not buffer overlaps or whole-town exemptions. Shared areas count for both named municipalities but remain one area. Area polygons reflect the publisher’s status: teal for likely eligible, coral for likely ineligible, gray for unknown. The street basemap requires internet access; saved boundaries, areas, and the table work offline.</p>
       <p class="source-meta" id="source-meta"></p>
     </div></details>
     <footer>Let’s Build Homes <span>Vermont · Housing data explorer</span></footer>

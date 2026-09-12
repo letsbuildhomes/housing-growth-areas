@@ -7,6 +7,7 @@ import duckdb
 
 from build_dashboard import build
 from export_data import group_areas, export_all, export_map
+from municipality_membership import derive_memberships
 
 
 def area(name, category, municipality='EXAMPLE TOWN', **kwargs):
@@ -18,7 +19,7 @@ def area(name, category, municipality='EXAMPLE TOWN', **kwargs):
 
 
 class DashboardTests(unittest.TestCase):
-    def test_story_towns_use_geometry_and_distinguish_designation_from_eligibility(self):
+    def test_story_towns_use_membership_despite_neighboring_geometry(self):
         with duckdb.connect(':memory:') as con:
             con.execute('LOAD spatial')
             con.execute('CREATE TABLE current_features (feature_id VARCHAR, name VARCHAR, municipality VARCHAR, geoid VARCHAR, kind VARCHAR, rpc VARCHAR, geom GEOMETRY)')
@@ -27,13 +28,13 @@ class DashboardTests(unittest.TestCase):
             con.execute('CREATE TABLE current_layers (run_id VARCHAR, source_id VARCHAR, kind VARCHAR)')
             for index in range(4):
                 x = index * 10
-                con.execute("INSERT INTO current_features VALUES (?, ?, ?, NULL, 'municipality_boundary', NULL, ST_GeomFromText(?))",
-                            [str(index), str(index), str(index), f'POLYGON(({x} 0,{x+4} 0,{x+4} 4,{x} 4,{x} 0))'])
-            # Conflicting source town labels must not replace the spatial relation.
+                con.execute("INSERT INTO current_features VALUES (?, ?, ?, ?, 'municipality_boundary', NULL, ST_GeomFromText(?))",
+                            [str(index), str(index), str(index), str(index), f'POLYGON(({x} 0,{x+4} 0,{x+4} 4,{x} 4,{x} 0))'])
+            # Geometry in a neighboring town must not confer membership there.
             for index, eligible in enumerate([True, False, None]):
-                x = index * 10 + 1
-                con.execute("INSERT INTO interim_areas VALUES (?, 'Area', 'Unrelated label', 'village_center_buffer', ?, ST_GeomFromText(?))",
-                            [str(index), eligible, f'POLYGON(({x} 1,{x+1} 1,{x+1} 2,{x} 2,{x} 1))'])
+                x = (index + 1) * 10 + 1
+                con.execute("INSERT INTO interim_areas VALUES (?, 'Area', ?, 'village_center_buffer', ?, ST_GeomFromText(?))",
+                            [str(index), str(index), eligible, f'POLYGON(({x} 1,{x+1} 1,{x+1} 2,{x} 2,{x} 1))'])
             result = export_map(con)
             flags = [(f['properties']['has_designated_area'], f['properties']['has_likely_eligible']) for f in result['towns']['features']]
             self.assertEqual(flags, [(True, True), (True, False), (True, False), (False, False)])
@@ -80,7 +81,7 @@ class DashboardTests(unittest.TestCase):
             payload = {'schema_version': 1, 'name': '</script><img src=x onerror=alert(1)>&'}
             (output / 'data' / 'interim-areas.json').write_text(json.dumps(payload))
             (output / 'data' / 'map.json').write_text(json.dumps({
-                'schema_version': 1, 'areas': {'type': 'FeatureCollection', 'features': []},
+                'schema_version': 2, 'areas': {'type': 'FeatureCollection', 'features': []},
                 'towns': {'type': 'FeatureCollection', 'features': []},
                 'rpcs': {'type': 'FeatureCollection', 'features': []},
             }))
@@ -91,6 +92,28 @@ class DashboardTests(unittest.TestCase):
             self.assertNotIn('<img src=x', html)
             self.assertNotIn('{{DATA}}', html)
             self.assertNotRegex(html, r'<script[^>]+src=|<link[^>]+href=')
+
+    def test_shared_membership_preserves_one_area_and_raw_label_without_geometry(self):
+        source = area('shared', 'village_center_buffer', ' JERICHO\\UNDERHILL ')
+        towns = [{'municipality': name, 'geoid': name} for name in ('Jericho', 'Underhill')]
+        result = derive_memberships([source], towns)
+        self.assertEqual({r['municipality'] for r in result}, {'Jericho', 'Underhill'})
+        self.assertEqual({r['feature_id'] for r in result}, {'shared'})
+        self.assertEqual(source['municipality'], ' JERICHO\\UNDERHILL ')
+
+    def test_approved_locality_and_feature_overrides_fail_closed(self):
+        towns = [{'municipality': name, 'geoid': name} for name in ('Plymouth', 'Rutland City')]
+        source = [area('tyson', 'village_center_buffer', 'TYSON'),
+                  area('95d37a2dfaaeb934:21', 'town_growth_development', 'Rutland')]
+        self.assertEqual([m['municipality'] for m in derive_memberships(source, towns)],
+                         ['Plymouth', 'Rutland City'])
+        for label in ('Rutland', 'Unreviewed label', None):
+            with self.assertRaisesRegex(ValueError, 'Review municipality membership'):
+                derive_memberships([area('new', 'town_growth_development', label)], towns)
+        with self.assertRaisesRegex(ValueError, 'Missing approved municipality target'):
+            derive_memberships([source[0]], towns[1:])
+        with self.assertRaisesRegex(ValueError, 'Ambiguous/missing'):
+            derive_memberships([], towns + towns)
 
 
 if __name__ == '__main__':

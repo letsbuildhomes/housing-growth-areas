@@ -1,4 +1,5 @@
 """Build a standalone HTML page from static exports. Never opens the database."""
+import base64
 import json
 from pathlib import Path
 
@@ -12,16 +13,18 @@ def build(output=OUTPUT):
     map_dataset = json.loads((output / 'data' / 'map.json').read_text())
     if dataset['schema_version'] != 1:
         raise ValueError('Unsupported interim export schema')
-    if map_dataset['schema_version'] != 1:
+    if map_dataset['schema_version'] != 2:
         raise ValueError('Unsupported map export schema')
     # Embedded JSON lets the page work directly via file:// as well as a static
     # server. Escape HTML delimiters so source strings cannot close the script.
     payload = json.dumps(dataset, ensure_ascii=False).replace('&', '\\u0026').replace('<', '\\u003c').replace('>', '\\u003e')
     substitutions = {
+        '{{LOGO}}': 'data:image/svg+xml;base64,' + base64.b64encode((ROOT / 'web' / 'assets' / 'lbh-logo.svg').read_bytes()).decode('ascii'),
         '{{STYLES}}': (ROOT / 'web' / 'dashboard.css').read_text(),
         '{{LEAFLET_CSS}}': (ROOT / 'web' / 'vendor' / 'leaflet.css').read_text(),
         '{{LEAFLET_JS}}': (ROOT / 'web' / 'vendor' / 'leaflet.js').read_text(),
-        '{{SCRIPT}}': (ROOT / 'web' / 'story-animation.js').read_text() + '\n' + (ROOT / 'web' / 'dashboard.js').read_text(),
+        '{{SCRIPT}}': '\n'.join((ROOT / 'web' / name).read_text() for name in
+                               ('story-animation.js', 'eligibility-display.js', 'dashboard.js')),
         '{{DATA}}': payload,
         '{{MAP_DATA}}': json.dumps(map_dataset, ensure_ascii=False).replace('&', '\\u0026').replace('<', '\\u003c').replace('>', '\\u003e'),
     }

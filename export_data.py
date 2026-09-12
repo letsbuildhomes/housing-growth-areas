@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 import duckdb
+from municipality_membership import MEMBERSHIP_VERSION, derive_memberships
 
 ROOT = Path(__file__).resolve().parent
 DB_PATH = ROOT / 'data' / 'act181_ingest.duckdb'
@@ -81,19 +82,8 @@ def export_map(con):
                                       likely_eligible, ST_AsGeoJSON(geom)
                                FROM interim_areas
                                ORDER BY feature_id''').fetchall()
-    town_fields = ['feature_id', 'name', 'municipality', 'geoid', 'has_designated_area', 'has_likely_eligible']
+    town_fields = ['feature_id', 'name', 'municipality', 'geoid']
     town_rows = con.execute('''SELECT t.feature_id, t.name, t.municipality, t.geoid,
-                                     EXISTS (
-                                       SELECT 1 FROM interim_areas a
-                                       WHERE a.geom IS NOT NULL AND t.geom IS NOT NULL
-                                         AND ST_Intersects(t.geom, a.geom)
-                                     ) AS has_designated_area,
-                                     EXISTS (
-                                       SELECT 1 FROM interim_areas a
-                                       WHERE a.likely_eligible IS TRUE
-                                         AND a.geom IS NOT NULL AND t.geom IS NOT NULL
-                                         AND ST_Intersects(t.geom, a.geom)
-                                     ) AS has_likely_eligible,
                                      ST_AsGeoJSON(t.geom)
                               FROM current_features t
                               WHERE t.kind = 'municipality_boundary'
@@ -109,9 +99,23 @@ def export_map(con):
         ORDER BY s.url''').fetchall()
     areas = [geojson_feature(row, area_fields) for row in area_rows]
     towns = [geojson_feature(row, town_fields) for row in town_rows]
+    memberships = derive_memberships([a['properties'] for a in areas],
+                                     [t['properties'] for t in towns])
+    eligible_ids = {a['properties']['feature_id'] for a in areas
+                    if a['properties']['likely_eligible'] is True}
+    designated = {m['municipality_geoid'] for m in memberships}
+    eligible = {m['municipality_geoid'] for m in memberships if m['feature_id'] in eligible_ids}
+    for town in towns:
+        props = town['properties']
+        props['has_designated_area'] = props['geoid'] in designated
+        props['has_likely_eligible'] = props['geoid'] in eligible
     rpcs = [geojson_feature(row, rpc_fields) for row in rpc_rows]
     return {
         'title': 'Interim areas and Vermont boundary reference layers',
+        'schema_version': 2,
+        'membership_version': MEMBERSHIP_VERSION,
+        'membership_basis': 'recorded municipality with approved crosswalk; no spatial fallback',
+        'memberships': memberships,
         'source_view': 'interim_areas + municipal_boundaries + rpc_boundaries',
         'source_urls': [row[0] for row in sources],
         'summary': {'areas': len(areas), 'municipalities': len(towns), 'rpcs': len(rpcs),
@@ -160,6 +164,7 @@ def export_all(db_path=DB_PATH, output=OUTPUT):
         write_json(output / f'{name}.json', dataset)
     write_json(output / 'manifest.json', {
         **common, 'datasets': [{'id': name, 'file': f'{name}.json',
+                              'schema_version': dataset['schema_version'],
                               'title': dataset['title'], 'source_view': dataset['source_view']}
                              for name, dataset in datasets.items()],
     })

@@ -62,8 +62,8 @@ its data, styling, and JavaScript. Saved polygons and the table work offline;
 the OpenStreetMap street basemap loads online tiles with visible attribution.
 The map starts at step 1 of a three-step story: boundaries, designated areas,
 then likely exemption eligibility. Previous/next arrows preserve the map extent.
-On the last transition, likely ineligible areas turn red, then towns with no
-remaining likely eligible areas turn red. Towns with no designated areas stay taupe.
+On the last transition, likely ineligible areas turn coral, then towns with no
+remaining likely eligible areas turn coral. Towns with no designated areas stay taupe.
 Reduced-motion preferences skip
 the animations. RPC boundaries retain their independent toggle.
 Step copy and color-linked count cards live in `steps` in `web/dashboard.js`; ordered `groups`
@@ -81,6 +81,14 @@ the compact polygon key identifies area colors. The RPC toggle includes its
 boundary line sample. Town fills use 60% opacity and area fills use 75%; the
 street basemap alone is grayscale at 50% opacity to reduce color interference.
 The step number remains available to screen readers.
+Brand tokens in `web/dashboard.css` follow the reports site's deep green,
+cream, coral, and orange palette (reviewed September 12, 2026). Georgia headings
+echo the published reports; body text and data remain sans-serif. Map teal is a
+darker adaptation of the brand's light blue for contrast. `--map-*` tokens feed
+both JavaScript overlays and their legends; table Yes/No colors stay blue/red.
+Fonts use local system stacks, so branding adds no external runtime assets.
+The official logo is stored in `web/assets/lbh-logo.svg` and embedded by the
+page builder; its source is documented alongside the asset.
 The reusable
 `web/story-animation.js` compiles these into a reversible timeline. One timing
 configuration controls phase duration (900 ms), gap ratio (0.5), and reverse
@@ -94,6 +102,12 @@ Hover over an interim area for its name, municipality, likely exemption status,
 and four reported criteria. Towns and RPC boundaries are noninteractive; there
 are no click popups. Hover criteria use the embedded table records matched by
 source feature ID, preserving Yes, No, and Unknown.
+The table groups three infrastructure columns under “Infrastructure · any one.”
+Hovers summarize this group as Met / Not met / Unknown, while retaining the
+publisher-reported eligibility result. Development-area zoning displays as
+“Not separately required” in the table and is omitted from hovers; source data
+is unchanged. Display logic lives in `web/eligibility-display.js`; verify it with
+`node --test test_eligibility_display.cjs`.
 Use View Vermont to reset the map extent. Scroll-wheel zoom is disabled to keep
 page scrolling smooth. No database server is needed. The local preview server
 is only serving files.
@@ -147,8 +161,12 @@ and `areas` array. Area records contain source IDs, name, municipality, category
 exemption type, likely eligibility, and the four criteria as true/false/null.
 Geometry is intentionally omitted from this table dataset. `map.json` is a
 separate compact geometry export containing interim areas, municipality
-boundaries, RPC boundaries, and the spatially derived town-level eligibility
-summary used by the Leaflet map.
+boundaries, RPC boundaries, and town-level eligibility derived from recorded
+municipality membership. `municipality_membership.py` runs locally during export,
+using the approved crosswalk without downloading data or writing to DuckDB.
+The map export is schema version 2 and includes auditable `memberships`,
+`membership_version`, and `membership_basis`; the table stays schema version 1.
+New unmatched labels stop export for review; they never silently use geometry.
 
 To add a dataset, add an exporter to `EXPORTERS` in `export_data.py`. `make export`
 and `make build` automatically include registered exports and update the dataset
@@ -227,7 +245,8 @@ EXPORTERS = {'interim-areas': export_interim}
 
 Update consumers when an export schema changes, and update the schema version
 when the shape is incompatible. The page builder currently accepts interim
-schema version 1. Keep geometry exports separate from lightweight table data.
+table schema version 1 and map schema version 2. Keep geometry exports separate
+from lightweight table data.
 
 Run `make test` for logic changes. The tests cover ingest completeness and
 rollback, grouping/order, missing values, missing-database behavior, and safe

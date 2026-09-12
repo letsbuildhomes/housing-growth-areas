@@ -209,15 +209,34 @@ A capture made with the boundary-enabled pipeline also creates
 source geometry. The current capture contains 256 municipality polygons and 11
 RPC polygons.
 
-The website's `map.json` export is derived from these views. It keeps geometry
-separate from the table export and computes `has_likely_eligible` for each town
-with `ST_Intersects` against the interim-area polygons. This is a display
-summary, not a legal or administrative determination. The additive map property
-`has_designated_area` uses the same spatial intersection rule without the
-eligibility filter. `summary.towns_with_designated_area` counts those towns.
-The story uses these two flags to distinguish towns without designated areas
-from towns whose designated areas contain no publisher-labeled likely eligible
-area. Boundary-touching intersections count; this does not remap source town labels.
+The website's `map.json` (schema version 2) keeps geometry separate from the
+table export. Its local `municipality_membership.py` derivation uses normalized
+source labels plus the approved municipality crosswalk, not intersections.
+`has_designated_area` means at least one assigned area; `has_likely_eligible`
+means at least one assigned area with publisher status true. Unknown status
+remains null on each area and does not qualify as true. These flags are a display
+summary, not a legal determination or whole-town exemption.
+
+The export includes `membership_version` (currently 1), `membership_basis`, and
+`memberships`: one object per `(feature_id, municipality_geoid)` containing those
+keys plus `source_municipality`, official `municipality`, and `method`
+(`normalized_exact`, `approved_alias`, or `approved_feature_override`).
+Original labels and geometry are preserved. Missing/invalid geometry does not
+prevent membership. Unmatched labels or missing/ambiguous target GEOIDs fail
+export for review, with no spatial fallback.
+
+The approved September 12, 2026 derivation yields 319 areas, 320 memberships
+(Jericho–Underhill has two), 187 municipalities with areas, 118 with a likely
+eligible area, 69 with areas but none likely eligible, and 69 without areas.
+Rutland City overrides are limited to the three reviewed source features;
+Tyson maps to Plymouth. The table still groups 194 original source labels.
+See `MUNICIPALITY_MEMBERSHIP.md` for the approved review record.
+
+The UI groups water, wastewater, and soils as infrastructure alternatives. Its
+display-only summary is true if any value is true, false if all are false, and
+null otherwise. It does not replace `likely_eligible`. For the
+`town_growth_development` category, the table displays “Not separately required”
+for zoning and the hover omits zoning; the exported source null is unchanged.
 
 ## Relationships and interpretation
 
