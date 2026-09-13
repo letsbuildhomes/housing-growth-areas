@@ -80,7 +80,9 @@ and without designated areas. Large square swatches identify town colors;
 the compact polygon key identifies area colors. The RPC toggle includes its
 boundary line sample. Town fills use 60% opacity and area fills use 75%; the
 street basemap alone is grayscale at 50% opacity to reduce color interference.
-The step number remains available to screen readers.
+The step number is available to screen readers. Labeled Back / Next step controls
+sit above the sidebar toolbar, with an orange Next button and a short explanation
+of the three-step map sequence.
 Brand tokens in `web/dashboard.css` follow the reports site's deep green,
 cream, coral, and orange palette (reviewed September 12, 2026). Georgia headings
 echo the published reports; body text and data remain sans-serif. Map teal is a
@@ -102,7 +104,12 @@ Hover over an interim area for its name, municipality, likely exemption status,
 and four reported criteria. Towns and RPC boundaries are noninteractive; there
 are no click popups. Hover criteria use the embedded table records matched by
 source feature ID, preserving Yes, No, and Unknown.
-The table groups three infrastructure columns under “Infrastructure · any one.”
+The table keeps publisher eligibility before the supporting zoning and infrastructure
+columns. Infrastructure shows a Met / Not met / Unknown summary with aligned
+water, wastewater, and soils answers underneath; at least one Yes meets the group.
+The neutral sticky header leaves status colors to the results. A requirements
+comparison table in “About this data” explains the AND/OR relationship; the main
+table footer contains only the sorting note.
 Hovers summarize this group as Met / Not met / Unknown, while retaining the
 publisher-reported eligibility result. Development-area zoning displays as
 “Not separately required” in the table and is omitted from hovers; source data

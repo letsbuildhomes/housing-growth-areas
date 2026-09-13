@@ -6,7 +6,7 @@
   const search = document.getElementById('search');
   const eligibility = document.getElementById('eligibility');
   const category = document.getElementById('category');
-  const fields = ['likely_eligible', 'zoning_bylaws', 'drinking_water', 'sewer_wastewater', 'adequate_soils'];
+  const fields = ['likely_eligible', 'zoning_bylaws'];
   const status = value => value === true ? 'yes' : value === false ? 'no' : 'unknown';
   const displayMunicipality = name => name === name.toUpperCase()
     ? name.toLowerCase().replace(/\b\w/g, letter => letter.toUpperCase()) : name;
@@ -91,19 +91,19 @@
     const eligible = mapData.summary.towns_with_likely_eligible_area;
     // Chapter copy is separate from the phase groups that lead into each chapter.
     const steps = [
-      {title: 'Vermont, town by town',
-        description: 'Start with the municipal boundaries that frame this story.',
+      {title: "Act 181",
+        description: 'Act 181 aimed to give Vermont\'s cities and towns relief from Act 250 to help spur housing develpoment in designated areas. How has this process panned out?',
         stats: [{count: total, label: 'Municipalities', color: muted}],
         areaKey: [],
       },
       {title: 'Designated areas',
-        description: 'Some municipalities contain designated areas; others have none.',
+        description: 'Some municipalities contain designated areas; others have none. Act 181 uses these areas as the basis for temporary Act 250 exemption.',
         stats: [{count: designated, label: 'With areas', color: good},
           {count: total - designated, label: 'No areas', color: absent}],
         areaKey: [[good, 'Designated areas']],
       },
       {title: 'Likely exemptions',
-        description: 'Which municipalities have an area with likely interim Act 250 exemption eligibility?',
+        description: 'Not all areas are exempt: there are infrastructure and zoning requirements for temporary exemptions.',
         stats: [{count: eligible, label: 'Likely eligible area', color: good},
           {count: designated - eligible, label: 'No likely eligible area', color: bad},
           {count: total - designated, label: 'No designated areas', color: absent}],
@@ -221,6 +221,9 @@
           const state = status(area[field]);
           cell.className = `boolean ${state}${index === 0 ? ' eligibility' : ''}`;
           cell.textContent = state === 'yes' ? 'Yes' : state === 'no' ? 'No' : 'Unknown';
+          if (field === 'zoning_bylaws') {
+            cell.textContent = state === 'yes' ? 'Met' : state === 'no' ? 'Not met' : 'Unknown';
+          }
           if (field === 'zoning_bylaws' && !EligibilityDisplay.zoningApplies(area)) {
             cell.className = 'boolean not-required';
             cell.textContent = 'Not separately required';
@@ -228,6 +231,25 @@
           }
           row.append(cell);
         });
+        const infrastructure = document.createElement('td');
+        infrastructure.className = 'infrastructure-cell';
+        const infrastructureState = status(EligibilityDisplay.infrastructure(area));
+        const result = document.createElement('strong');
+        result.className = `requirement-result ${infrastructureState}`;
+        result.textContent = infrastructureState === 'yes' ? '✓ Met' : infrastructureState === 'no' ? '✕ Not met' : '? Unknown';
+        const alternatives = document.createElement('div');
+        alternatives.className = 'infrastructure-alternatives';
+        for (const [field, label] of [['drinking_water', 'Water'], ['sewer_wastewater', 'Wastewater'], ['adequate_soils', 'Soils']]) {
+          const item = document.createElement('span');
+          const state = status(area[field]);
+          item.className = `alternative alternative-${state}`;
+          item.textContent = `${state === 'yes' ? '✓' : state === 'no' ? '✕' : '?'} ${label}`;
+          item.setAttribute('aria-label', `${label}: ${state === 'yes' ? 'Yes' : state === 'no' ? 'No' : 'Unknown'}`);
+          item.title = item.getAttribute('aria-label');
+          alternatives.append(item);
+        }
+        infrastructure.append(result, alternatives);
+        row.append(infrastructure);
         body.append(row);
       }
       fragment.append(body);
