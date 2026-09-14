@@ -18,6 +18,11 @@ source findings, and approved municipality decisions.
 
 ## Code and display contracts
 
+- Keep UI copy spare. Do not add decorative step labels or repeat navigation
+  instructions (for example, “Vermont in three steps,” “Step 1 of 3,” and
+  “Scroll to continue or use the steps below”). Use one purposeful scroll cue
+  beside navigation; let the visual progress indicator communicate progress.
+
 - Keep production Python in `extract.py`, `transform.py`, `analyze.py`, `config.py`,
   and `arcgis.py`. Prefer functions in their owning stage over new helper modules.
 - Edit `web/` and the source scripts, not generated output. The standalone table

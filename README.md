@@ -65,7 +65,7 @@ analyze.py   → out/dashboard/data/*.json + index.html
 | `config.py` | Paths, publisher mappings, and approved municipality exceptions. |
 | `arcgis.py` | HTTP requests, retries, pagination, and completeness checks. |
 | `web/` | Editable HTML, CSS, browser scripts, logo, and vendored Leaflet. |
-| `tests/` | Python regressions and `browser.html` for seven browser checks. |
+| `tests/` | Python regressions and `browser.html` for browser checks. |
 | [Research reference](docs/research.md) | Source scope, schemas, dated findings, crosswalk decisions, export contract. |
 
 `transform.py --prepare` reads the database without modifying it and regenerates
@@ -100,9 +100,31 @@ browser scripts, reports pass/fail, and needs no extra runtime. These checks are
 manual and are not part of `make test`. Also inspect filters/reset, merged cells,
 map navigation, hover values, and narrow layouts when changing their behavior.
 
-Chapter copy, groups, and counts live in `web/dashboard.js`; reversible timing
+Chapter copy, groups, and counts live in `web/dashboard.js`; scroll timeline sampling
 lives in `web/story-animation.js`; display-only criteria logic lives in
 `web/eligibility-display.js`. Colors and layout live in `web/dashboard.css`.
 The logo at `web/assets/lbh-logo.svg` was downloaded unmodified on September 12,
 2026 from the [Let's Build Homes reports site](https://reports.letsbuildhomes.org/static/img/lbh-landscape-rgb-2.svg)
 and is embedded for offline use. Leaflet retains its upstream license notices.
+
+On viewports at least 1000px wide and 700px tall, the map fills a sticky viewport
+while native page scrolling selects three chapters, each with 125vh of reading
+distance. Map styles and card positions are sampled directly from scroll position;
+there is no timed playback to catch up after fast scrolling. Cards move from 25%
+to 100% of each interval, leaving upward and entering from below. Map overlays
+transition from 50% to 100%. Both arrive at the next dot together.
+Back/Next and dots move the page with a 1050ms ease-in/ease-out scroll; wheel,
+touch, pointer, or keyboard input cancels it. Smaller windows place the compact
+timeline between the map and card text on one background, without a skip link.
+In that compact layout, navigation animates map styles over 1275ms with the same
+ease-in/ease-out in either direction. The progress line and dots follow the map's
+rendered playhead while the card stays stationary; rapid clicks retarget from
+the current map state.
+Reduced motion shows chapter changes
+immediately. A bottom navigation track fills continuously as the page scrolls;
+its dots select chapters, arrows move between chapters, and a skip link leads
+to the table. The track ends at the final chapter, preserving its reading time
+without an extra line tail. Reduced motion swaps complete scenes without card
+movement. Map reset, RPC controls, and zoom sit in the bottom right. Check forward
+and reverse scrolling, direct navigation, resizing, and the final release into
+the table when changing this behavior.

@@ -20,38 +20,28 @@
         <p class="intro">Explore likely exemption eligibility and the criteria reported for each area.</p></div>
       <p class="capture">Source snapshot <strong id="capture-date">—</strong></p>
     </div>
-    <section class="map-panel" aria-label="Map of interim exemption areas and Vermont boundaries">
-      <div class="map-heading"><div><p class="eyebrow">Spatial view</p><h2>Act 250 exemption areas across Vermont</h2></div><p class="map-summary" id="map-summary">—</p></div>
+    <section class="map-panel" id="map-walkthrough" aria-label="Map of interim exemption areas and Vermont boundaries">
+      <div class="map-stage">
       <div class="map-layout">
         <div id="map" class="map" role="region" aria-label="Interactive map of Vermont interim areas, towns, and regional planning commissions"></div>
-        <section class="map-story" aria-label="Map story">
-          <div class="story-content" aria-live="polite" aria-atomic="true">
-            <div class="story-copy">
-              <p id="story-position" class="sr-only"></p>
-              <h3 id="story-title"></h3>
-              <p id="story-description"></p>
-            </div>
-            <div class="story-key">
-              <h4 id="story-stat-heading">Municipalities · map key</h4>
-              <div id="map-legend" class="story-stats" aria-labelledby="story-stat-heading"></div>
-              <div id="story-area-key" class="story-area-key" aria-label="Area polygon colors"></div>
-            </div>
-          </div>
+        <section class="map-story" aria-label="Map story"></section>
+      </div>
           <nav class="story-navigation" aria-label="Map story navigation">
             <div class="story-navigation-controls">
-              <button id="story-prev" type="button" aria-label="Previous map step">← Back</button>
-              <div id="story-progress" class="story-progress" aria-hidden="true"></div>
-              <button id="story-next" type="button" aria-label="Next map step">Next step →</button>
+              <button id="story-prev" type="button" aria-label="Previous map step">←</button>
+              <div id="story-progress" class="story-progress"></div>
+              <button id="story-next" type="button" aria-label="Next map step">→</button>
             </div>
+            <div class="story-navigation-footer"><a href="#area-data">Skip to data ↓</a></div>
           </nav>
           <div class="map-actions">
             <label class="rpc-toggle" title="Regional Planning Commission boundaries"><input id="rpc-toggle" type="checkbox" checked><i class="rpc-line" aria-hidden="true"></i>RPC boundaries<span class="sr-only"> (Regional Planning Commissions)</span></label>
             <button id="map-reset" type="button">View Vermont</button>
           </div>
-        </section>
-      </div>
       <p id="basemap-status" class="basemap-status" role="status" hidden>Street map unavailable. Saved area and boundary layers remain visible.</p>
+      </div>
     </section>
+    <div class="data-heading" id="area-data" tabindex="-1"><p class="eyebrow">Explore the records</p><h2>Every area, town by town.</h2><p>Search the saved snapshot and compare publisher-reported eligibility.</p></div>
     <section class="table-panel" aria-label="Interim areas by municipality">
       <form class="toolbar" id="filters" role="search">
         <div class="search-control"><label for="search">Find a municipality or area</label><input id="search" type="search" placeholder="Search by name…" autocomplete="off"></div>

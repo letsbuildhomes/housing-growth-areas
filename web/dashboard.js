@@ -111,7 +111,7 @@
     // Chapter copy is separate from the phase groups that lead into each chapter.
     const steps = [
       {title: "Act 181",
-        description: 'Act 181 aimed to give Vermont\'s cities and towns relief from Act 250 to help spur housing develpoment in designated areas. How has this process panned out?',
+        description: 'Act 181 aimed to give Vermont\'s cities and towns relief from Act 250 to help spur housing development in designated areas. How has this process panned out?',
         stats: [{count: total, label: 'Municipalities', color: muted}],
         areaKey: [],
       },
@@ -151,50 +151,178 @@
     areaLayer.eachLayer(layer => initial.push({layer, kind: 'area', props: layer.feature.properties,
       style: {color: good, fillColor: good, opacity: 0, fillOpacity: 0}}));
     const timeline = MapStoryAnimation.compile(initial, groups);
-    const playback = MapStoryAnimation.player(timeline, (items, position) => {
-      items.forEach(item => item.layer.setStyle(item.style));
-      map.getPane('storyAreas').classList.toggle('story-areas-hidden', position === 0);
-    }, {reduced: () => reducedMotion.matches});
-    let currentStep = 0;
+    let currentStep = 0, lastPosition = null;
+    const scrollLayout = window.matchMedia('(min-width: 1000px) and (min-height: 700px)');
+    const walkthrough = document.getElementById('map-walkthrough');
+    const stage = walkthrough.querySelector('.map-stage');
     const previous = document.getElementById('story-prev');
     const next = document.getElementById('story-next');
     const progress = document.getElementById('story-progress');
-    progress.innerHTML = steps.map(() => '<span></span>').join('');
-    function showStep(index) {
-      if (index < 0 || index >= steps.length) return;
+    const originalCard = document.querySelector('.map-story');
+    const cards = steps.map((step, index) => {
+      const card = originalCard.cloneNode(false);
+      card.setAttribute('aria-label', step.title);
+      card.innerHTML = `<div class="story-content"><div class="story-copy">
+        <h3>${escapeHTML(step.title)}</h3><p class="story-description">${escapeHTML(step.description)}</p>
+        </div><div class="story-key"><h4>Municipalities · map key</h4>
+        <div class="story-stats">${step.stats.map(({count, label, color}) =>
+          `<div class="story-stat" style="--stat-color:${color}"><i class="stat-swatch" aria-hidden="true"></i><strong>${number(count)}</strong><span>${escapeHTML(label)}</span></div>`).join('')}</div>
+        ${step.areaKey.length ? `<div class="story-area-key"><h4>Area polygons</h4><div>${step.areaKey.map(([color, label]) =>
+          `<span><i style="background:${color}" aria-hidden="true"></i>${escapeHTML(label)}</span>`).join('')}</div></div>` : ''}
+        </div></div>`;
+      originalCard.before(card);
+      return card;
+    });
+    originalCard.remove();
+    progress.innerHTML = steps.map((step, index) => `<button type="button" class="story-stop"
+      style="left:${index / (steps.length - 1) * 100}%" aria-label="${escapeHTML(step.title)}" title="${escapeHTML(step.title)}"></button>`).join('');
+    [...progress.children].forEach((dot, index) => dot.addEventListener('click', () => navigateStep(index)));
+    function renderChapter(chapter, mapPosition) {
+      const bounded = Math.max(0, Math.min(steps.length - 1, chapter));
+      const state = MapStoryAnimation.scrollState(bounded, timeline.stops);
+      const index = Math.round(bounded);
+      if (index !== currentStep) areaLayer.eachLayer(layer => layer.closeTooltip());
       currentStep = index;
-      const step = steps[index];
-      areaLayer.eachLayer(layer => layer.closeTooltip());
-      document.getElementById('story-position').textContent = `Step ${index + 1} of ${steps.length}`;
-      document.getElementById('story-title').textContent = step.title;
-      document.getElementById('story-description').textContent = step.description;
-      document.getElementById('map-legend').innerHTML = step.stats.map(({count, label, color}) =>
-        `<div class="story-stat" style="--stat-color:${color}"><i class="stat-swatch" aria-hidden="true"></i><strong>${number(count)}</strong><span>${escapeHTML(label)}</span></div>`).join('');
-      const areaKey = document.getElementById('story-area-key');
-      areaKey.hidden = !step.areaKey.length;
-      areaKey.innerHTML = step.areaKey.length ? `<h4>Area polygons</h4><div>${step.areaKey.map(([color, label]) =>
-        `<span><i style="background:${color}" aria-hidden="true"></i>${escapeHTML(label)}</span>`).join('')}</div>` : '';
+      const position = reducedMotion.matches ? timeline.stops[index] : (mapPosition ?? state.position);
+      if (position !== lastPosition) {
+        timeline.sample(position).forEach(item => item.layer.setStyle(item.style));
+        map.getPane('storyAreas').classList.toggle('story-areas-hidden', position === 0);
+        lastPosition = position;
+      }
+      const moving = scrollLayout.matches && !reducedMotion.matches;
+      cards.forEach((card, i) => {
+        const offset = i <= state.from ? -state.amount : 1 - state.amount;
+        const visible = moving
+          ? (i === state.from && state.amount < 1) || (i === state.from + 1 && state.amount > 0)
+          : i === index;
+        card.hidden = !visible;
+        card.inert = i !== index;
+        card.setAttribute('aria-hidden', String(i !== index));
+        card.style.transform = moving
+          ? `translateY(calc(-50% + ${offset * stage.clientHeight}px))` : '';
+      });
       previous.disabled = index === 0;
       next.disabled = index === steps.length - 1;
-      [...progress.children].forEach((dot, i) => dot.classList.toggle('active', i === index));
-      playback.go(index);
+      // Compact navigation follows the rendered playhead, not its destination.
+      const progressChapter = !scrollLayout.matches
+        ? MapStoryAnimation.chapterAt(position, timeline.stops) : bounded;
+      const activeDot = !scrollLayout.matches ? Math.floor(progressChapter) : index;
+      progress.style.setProperty('--progress', `${progressChapter / (steps.length - 1) * 100}%`);
+      [...progress.children].forEach((dot, i) => {
+        dot.classList.toggle('reached', i <= progressChapter);
+        if (i === activeDot) dot.setAttribute('aria-current', 'step');
+        else dot.removeAttribute('aria-current');
+      });
     }
-    previous.addEventListener('click', () => showStep(currentStep - 1));
-    next.addEventListener('click', () => showStep(currentStep + 1));
-    reducedMotion.addEventListener('change', () => playback.go(currentStep));
-    showStep(0);
+    // The map and card positions are pure samples of the same scroll timeline.
+    const chapterDistance = () => (walkthrough.offsetHeight - stage.offsetHeight) / steps.length;
+    let navigationFrame = null;
+    let mapFrame = null;
+    function cancelMapAnimation() {
+      if (mapFrame !== null) cancelAnimationFrame(mapFrame);
+      mapFrame = null;
+    }
+    const navigation = document.querySelector('.story-navigation');
+    function cancelNavigation() {
+      if (navigationFrame !== null) cancelAnimationFrame(navigationFrame);
+      navigationFrame = null;
+    }
+    // User input always takes over from an arrow/dot's eased page movement.
+    for (const event of ['wheel', 'touchstart', 'pointerdown', 'keydown']) {
+      window.addEventListener(event, cancelNavigation, {passive: true});
+    }
+    function navigateStep(index) {
+      if (index < 0 || index >= steps.length) return;
+      cancelNavigation();
+      cancelMapAnimation();
+      if (!scrollLayout.matches && !reducedMotion.matches) {
+        const start = lastPosition ?? timeline.stops[currentStep];
+        const target = timeline.stops[index];
+        const started = performance.now();
+        renderChapter(index, start);
+        function tickMap(now) {
+          const t = Math.min(1, (now - started) / 1275);
+          const eased = t * t * (3 - 2 * t);
+          renderChapter(index, start + (target - start) * eased);
+          mapFrame = t < 1 ? requestAnimationFrame(tickMap) : null;
+        }
+        mapFrame = requestAnimationFrame(tickMap);
+        return;
+      }
+      if (scrollLayout.matches && !reducedMotion.matches) {
+        const start = window.scrollY;
+        const target = start + walkthrough.getBoundingClientRect().top + chapterDistance() * index + 1;
+        const started = performance.now();
+        function tick(now) {
+          const t = Math.min(1, (now - started) / 1050);
+          const eased = t * t * (3 - 2 * t);
+          window.scrollTo({top: start + (target - start) * eased, behavior: 'instant'});
+          syncScroll();
+          navigationFrame = t < 1 ? requestAnimationFrame(tick) : null;
+        }
+        navigationFrame = requestAnimationFrame(tick);
+        return;
+      } else if (scrollLayout.matches) {
+        window.scrollTo({top: window.scrollY + walkthrough.getBoundingClientRect().top
+          + chapterDistance() * index + 1, behavior: 'instant'});
+      }
+      renderChapter(index);
+    }
+    previous.addEventListener('click', () => navigateStep(currentStep - 1));
+    next.addEventListener('click', () => navigateStep(currentStep + 1));
+    document.querySelector('.story-navigation-footer a').addEventListener('click', event => {
+      event.preventDefault();
+      const destination = document.getElementById('area-data');
+      destination.focus({preventScroll: true});
+      destination.scrollIntoView({behavior: reducedMotion.matches ? 'instant' : 'smooth', block: 'start'});
+      history.replaceState(null, '', '#area-data');
+    });
+    let scrollFrame = null;
+    function syncScroll() {
+      scrollFrame = null;
+      renderChapter(scrollLayout.matches
+        ? -walkthrough.getBoundingClientRect().top / chapterDistance() : currentStep);
+    }
+    window.addEventListener('scroll', () => {
+      if (scrollLayout.matches && scrollFrame === null) scrollFrame = requestAnimationFrame(syncScroll);
+    }, {passive: true});
+    function placeNavigation() {
+      cancelNavigation();
+      cancelMapAnimation();
+      if (scrollLayout.matches) stage.append(navigation);
+      else cards[0].before(navigation);
+      syncScroll();
+    }
+    reducedMotion.addEventListener('change', () => { cancelNavigation(); cancelMapAnimation(); syncScroll(); });
+    scrollLayout.addEventListener('change', placeNavigation);
+    placeNavigation();
+    renderChapter(0);
+    map.zoomControl.setPosition('bottomright');
+    const actions = L.control({position: 'bottomright'});
+    actions.onAdd = () => {
+      const element = document.querySelector('.map-actions');
+      L.DomEvent.disableClickPropagation(element);
+      return element;
+    };
+    actions.addTo(map);
     document.getElementById('rpc-toggle').addEventListener('change', event => {
       if (event.target.checked) rpcLayer.addTo(map);
       else map.removeLayer(rpcLayer);
     });
     const bounds = townLayer.getBounds();
-    if (bounds.isValid()) map.fitBounds(bounds.pad(0.025));
-    else map.setView([44.04, -72.7], 7.25);
-    document.getElementById('map-reset').addEventListener('click', () => {
-      if (bounds.isValid()) map.fitBounds(bounds.pad(0.025));
-    });
-    document.getElementById('map-summary').textContent = `${number(mapData.summary.areas)} areas · ${number(mapData.summary.municipalities)} towns · ${number(mapData.summary.rpcs)} RPCs`;
-    window.setTimeout(() => map.invalidateSize(), 0);
+    function fitVermont() {
+      map.invalidateSize();
+      const padding = scrollLayout.matches ? {paddingTopLeft: [60, 35], paddingBottomRight: [352 + stage.clientWidth * .08 + 24, 140]} : {};
+      if (bounds.isValid()) map.fitBounds(bounds.pad(0.025), {...padding, animate: false});
+      else map.setView([44.04, -72.7], 7.25);
+    }
+    function resizeStory() {
+      fitVermont();
+      if (mapFrame === null) syncScroll();
+    }
+    document.getElementById('map-reset').addEventListener('click', fitVermont);
+    new ResizeObserver(resizeStory).observe(document.getElementById('map'));
+    resizeStory();
   }
   initMap();
 

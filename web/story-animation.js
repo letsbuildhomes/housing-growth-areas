@@ -64,6 +64,21 @@
       if (position !== target) frame = requestFrame(tick);
     }};
   }
-  const api = {timing, compile, player};
+  // Cards start after a quarter interval; map phases start halfway through.
+  // Both arrive at the next stop exactly, independent of scroll speed.
+  function scrollState(chapter, stops) {
+    const value = Math.max(0, Math.min(stops.length - 1, chapter));
+    const from = Math.min(stops.length - 2, Math.floor(value));
+    const amount = Math.max(0, Math.min(1, (value - from - 0.25) / 0.75));
+    const mapAmount = Math.max(0, Math.min(1, (value - from - 0.5) / 0.5));
+    return {from, amount, position: stops[from] + (stops[from + 1] - stops[from]) * mapAmount};
+  }
+  function chapterAt(position, stops) {
+    const value = Math.max(stops[0], Math.min(stops[stops.length - 1], position));
+    const next = stops.findIndex(stop => stop > value);
+    if (next === -1) return stops.length - 1;
+    return next - 1 + (value - stops[next - 1]) / (stops[next] - stops[next - 1]);
+  }
+  const api = {timing, compile, player, scrollState, chapterAt};
   window.MapStoryAnimation = api;
 })();
