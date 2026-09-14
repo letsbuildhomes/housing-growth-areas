@@ -5,9 +5,9 @@ import tempfile
 import unittest
 import duckdb
 
-from build_dashboard import build
-from export_data import group_areas, export_all, export_map
-from municipality_membership import derive_memberships
+from analyze import build
+from analyze import group_areas, export_all, export_map
+from transform import derive_memberships
 
 
 def area(name, category, municipality='EXAMPLE TOWN', **kwargs):
@@ -35,7 +35,8 @@ class DashboardTests(unittest.TestCase):
                 x = (index + 1) * 10 + 1
                 con.execute("INSERT INTO interim_areas VALUES (?, 'Area', ?, 'village_center_buffer', ?, ST_GeomFromText(?))",
                             [str(index), str(index), eligible, f'POLYGON(({x} 1,{x+1} 1,{x+1} 2,{x} 2,{x} 1))'])
-            result = export_map(con)
+            from transform import inputs
+            result = export_map(con, derive_memberships(*inputs(con)))
             flags = [(f['properties']['has_designated_area'], f['properties']['has_likely_eligible']) for f in result['towns']['features']]
             self.assertEqual(flags, [(True, True), (True, False), (True, False), (False, False)])
             self.assertEqual(result['summary']['towns_with_designated_area'], 3)
@@ -78,10 +79,12 @@ class DashboardTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             output = Path(temp)
             (output / 'data').mkdir()
-            payload = {'schema_version': 1, 'name': '</script><img src=x onerror=alert(1)>&'}
+            common = {'snapshot_id': 'test', 'captured_at': '2026-09-08', 'exported_at': '2026-09-13'}
+            (output / 'data' / 'manifest.json').write_text(json.dumps(common))
+            payload = {**common, 'schema_version': 1, 'name': '</script><img src=x onerror=alert(1)>&'}
             (output / 'data' / 'interim-areas.json').write_text(json.dumps(payload))
             (output / 'data' / 'map.json').write_text(json.dumps({
-                'schema_version': 2, 'areas': {'type': 'FeatureCollection', 'features': []},
+                **common, 'schema_version': 2, 'areas': {'type': 'FeatureCollection', 'features': []},
                 'towns': {'type': 'FeatureCollection', 'features': []},
                 'rpcs': {'type': 'FeatureCollection', 'features': []},
             }))

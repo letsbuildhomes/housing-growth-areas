@@ -65,6 +65,5 @@
     }};
   }
   const api = {timing, compile, player};
-  if (typeof module !== 'undefined' && module.exports) module.exports = api;
-  else window.MapStoryAnimation = api;
+  window.MapStoryAnimation = api;
 })();

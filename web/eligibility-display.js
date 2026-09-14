@@ -7,4 +7,3 @@ const EligibilityDisplay = {
       : values.every(value => value === false) ? false : null;
   },
 };
-if (typeof module !== 'undefined') module.exports = EligibilityDisplay;

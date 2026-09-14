@@ -1,15 +1,51 @@
-# Database table and column reference
+# Research reference
+
+This document holds data contracts, dated source findings, and approved research
+decisions. See [README](../README.md) for setup, commands, and editing the dashboard.
+Counts below are dated observations, not expectations for future captures.
+
+- [Source scope](#source-scope)
+- [Database schema](#database-schema)
+- [Dated source findings](#dated-source-findings)
+- [Municipality decisions](#municipality-decisions)
+- [Dashboard export contract](#dashboard-export-contract)
+
+## Source scope
+
+`extract.py` resolves the [FLU/tier viewer](https://experience.arcgis.com/experience/58543fd6882d4bd6bd0b3008d98e874e/page/Main-Map-Page)
+and [interim viewer](https://experience.arcgis.com/experience/d96022b7dce64945a326e7bf98a2f365/)
+through their web maps to queryable ArcGIS REST layers. Additional explicit items
+are [approved FLU](https://www.arcgis.com/home/item.html?id=bf09ba3367404b88933b55f31726ab81),
+[municipal boundaries](https://geodata.vermont.gov/datasets/3f464b0e1980450e9026430a635bff0a),
+and [RPC boundaries](https://geodata.vermont.gov/datasets/b311ad21d306477eb2bbefa95fe6460d).
+VCGI's BNDHASH boundaries support general mapping; they are not legally definitive.
+
+Interim layers I–III include downtown districts, town/growth/development areas,
+and village centers with existing buffers. Layers IV–V (priority housing projects
+and urbanized transit buffers) are excluded. All published FLU types, submitted
+and approved tier types, hamlet points, and the viewer's under-review Tier 1A
+source are retained. Parcels, infrastructure layers, flood zones, and basemaps
+are outside the research ingest.
+
+Each distinct source URL is captured once; server-evaluated filters record its
+logical map memberships. Hidden and empty selected layers are retained. Raw
+metadata, map documents, returned geometry, complete attributes, and SHA-256
+checksums remain in each completed snapshot. Missing/duplicate IDs, truncated
+responses, count discrepancies, and observed source edits fail capture. These
+checks do not provide an atomic statewide historical snapshot. In-place publisher
+edits mean a current capture cannot reconstruct original submission geometry.
+
+## Database schema
 
 This describes **`data/act181_ingest.duckdb`**, the current ingest database.
 Schema and counts were checked against the database on September 8, 2026,
-for snapshot `20260908T222348.634248Z`. The older `data/act181.duckdb` belongs
-to the [legacy analysis](LEGACY_ANALYSIS.md) and is outside this reference.
+for snapshot `20260908T222348.634248Z`.
 
 There are **5 stored tables and 18 views**. A view is a saved query that you
 can use like a table; it does not store another copy of the data. Shared view
 columns are documented once below rather than repeated for every dataset.
 
-## Where to start
+### Where to start
 
 | If you want… | Start with |
 |---|---|
@@ -27,7 +63,7 @@ is true/false; `JSON` stores an object or array; `GEOMETRY` is spatial data;
 `TIMESTAMP WITH TIME ZONE` is a timestamp with timezone support.
 `NULL` means missing, unknown, or not applicable—not false or zero.
 
-## `ingest_features`
+### `ingest_features`
 
 **The actual areas and points, with geometry and attributes.** One row per
 source feature per capture. Currently **18,377 rows**, with **31 columns**.
@@ -72,30 +108,11 @@ The criteria columns map `Y`/`Yes` to true and `N`/`No` to false. Blank,
 missing, and unrecognized values become NULL. They describe source-reported
 criteria, not independently verified infrastructure availability.
 
-### Additional information inside `raw_properties`
+Source-specific notes, dates, designation links, measurements, and edit history
+remain in `raw_properties`; consult `ingest_sources.metadata` for field aliases,
+types, domains, and units. These keys vary by service and are not extra SQL columns.
 
-These are **JSON keys, not extra SQL columns**. Availability varies by source.
-This is a selection of useful keys; the complete source-specific field list,
-aliases, and coded domains are in `ingest_sources.metadata`.
-
-| Information | Source keys currently present |
-|---|---|
-| Notes and alternate names | `NOTES`, `Notes`, `Comments`, `DESCRIPT`, `AreaName`, `Name`, `Town` |
-| Submission and publication dates | `DATE_RPC`, `DATE_SUBM`, `DATE_AGG`, `DATE_CSA`, `DATE` |
-| Submitter and designation details | `SUBMITTER`, `Submitter`, `DESIG_CS`, `DESIG_TYP`, `LU_AUTH` |
-| Source acreage and measurements | `ACRES`, `Acres`, `Shape__Area`, `Shape__Length`, `Shape.STArea()`, `Shape.STLength()`, `Shape_Leng` |
-| Buffer and original feature references | `BUFF_DIST`, `ORIG_FID` |
-| Water/wastewater system references | `DW_System`, `DW_WSID`, `WW_Facility`, `WW_FacilityID` |
-| Designation documents and renewals | `ApprovedMap`, `Renewal`, `RenewalDate`, `RENEWED` |
-| Publisher edit history | `CreationDate`, `Creator`, `EditDate`, `Editor`, `created_date`, `created_user`, `last_edited_date`, `last_edited_user` |
-| Organization/contact information | `OrganizationName`, `website`, `email`, `Phonenumber` |
-
-Dates in raw JSON may be date strings or ArcGIS epoch-millisecond numbers.
-Source measurement units depend on the service metadata; they are not all
-standardized acreage. Alternate source names such as `Name` and `Town` are
-preserved here even when they do not populate the normalized name columns.
-
-## `ingest_layers`
+### `ingest_layers`
 
 **The map's logical layers and the filters that define them.** One row per
 layer per capture. Currently **62 rows**. Primary key: **(`run_id`, `layer_id`)**.
@@ -114,7 +131,7 @@ layer per capture. Currently **62 rows**. Primary key: **(`run_id`, `layer_id`)*
 | `definition` | JSON | Original map-layer configuration, including renderer/popup settings when present. For the additional approved FLU source, its published service-layer entry. |
 | `feature_count` | BIGINT | Number of source features matching this logical layer's filter. Zero-count layers are retained. |
 
-## `ingest_sources`
+### `ingest_sources`
 
 **Where the data came from and how the publisher defines its fields.** One
 row per distinct ArcGIS layer URL per capture. Currently **27 rows**.
@@ -128,7 +145,7 @@ Primary key: **(`run_id`, `source_id`)**.
 | `expected_count` | BIGINT | Complete source feature count, verified against object IDs and downloaded records. Not restricted to the viewer's map filters. |
 | `metadata` | JSON | Complete ArcGIS layer metadata: name, geometry type, field definitions/aliases/domains, object-ID field, query capabilities, and available edit information. |
 
-## `ingest_memberships`
+### `ingest_memberships`
 
 **The link between features and logical map layers.** One row for each
 feature's membership in a layer, per capture. Currently **15,978 rows**.
@@ -143,7 +160,7 @@ All three columns form the primary key and are NOT NULL.
 A feature can belong to multiple layers or none. Memberships come from the
 server's evaluation of the map filters, not from a spatial intersection.
 
-## `ingest_runs`
+### `ingest_runs`
 
 **Capture history and reproducibility information.** One row per successfully
 loaded capture. Currently **1 row**. Primary key: **`run_id`**.
@@ -156,7 +173,7 @@ loaded capture. Currently **1 row**. Primary key: **`run_id`**.
 | `snapshot_path` | VARCHAR | Absolute path to the saved snapshot directory. |
 | `manifest` | JSON | Capture manifest: schema version, timestamps, CRS, source/layer inventory, membership IDs, and file checksums. |
 
-## Views: current data and map-ready records
+### Views: current data and map-ready records
 
 The following views select the latest successful run. They have the complete
 column sets indicated below, with the same types and meanings as their source
@@ -182,7 +199,7 @@ tables. They add no columns unless explicitly listed.
 One source feature can appear more than once in `map_features`, once per
 layer membership. Identify a row by **(`run_id`, `layer_id`, `feature_id`)**.
 
-## Views: individual datasets
+### Views: individual datasets
 
 **Each of these views has all 35 columns from `map_features`**: the 31-column
 feature table above plus `layer_id`, `map_stage`, `map_rpc`, and `map_path`.
@@ -210,8 +227,8 @@ source geometry. The current capture contains 256 municipality polygons and 11
 RPC polygons.
 
 The website's `map.json` (schema version 2) keeps geometry separate from the
-table export. Its local `municipality_membership.py` derivation uses normalized
-source labels plus the approved municipality crosswalk, not intersections.
+table export. It consumes prepared municipality relationships derived from
+normalized source labels plus the approved crosswalk, not intersections.
 `has_designated_area` means at least one assigned area; `has_likely_eligible`
 means at least one assigned area with publisher status true. Unknown status
 remains null on each area and does not qualify as true. These flags are a display
@@ -223,14 +240,36 @@ keys plus `source_municipality`, official `municipality`, and `method`
 (`normalized_exact`, `approved_alias`, or `approved_feature_override`).
 Original labels and geometry are preserved. Missing/invalid geometry does not
 prevent membership. Unmatched labels or missing/ambiguous target GEOIDs fail
-export for review, with no spatial fallback.
+preparation for review, with no spatial fallback.
 
 The approved September 12, 2026 derivation yields 319 areas, 320 memberships
 (Jericho–Underhill has two), 187 municipalities with areas, 118 with a likely
 eligible area, 69 with areas but none likely eligible, and 69 without areas.
 Rutland City overrides are limited to the three reviewed source features;
 Tyson maps to Plymouth. The table still groups 194 original source labels.
-See `MUNICIPALITY_MEMBERSHIP.md` for the approved review record.
+See [municipality decisions](#municipality-decisions) below.
+
+### Prepared municipality relationships
+
+`data/municipality-memberships.json` is a derived sidecar, not a new database
+table. `make prepare` (also a dependency of build/export/analyze) reads the saved
+database and writes it without reloading source data. Snapshot transformation
+also prepares it. It can be regenerated; raw snapshots and DuckDB are unchanged
+by preparation. The current file schema is version 1:
+
+| Field | Meaning |
+|---|---|
+| `schema_version` | Prepared file contract version (1). |
+| `snapshot_id` | Successful source capture used for this derivation. |
+| `membership_version` | Approved crosswalk version (1). |
+| `membership_basis` | Recorded municipality with approved crosswalk; no spatial fallback. |
+| `rules_sha256` | SHA-256 of the approved alias values, feature exceptions, and membership version (comments and formatting do not affect it). |
+| `inputs_sha256` | SHA-256 of ordered source area IDs/labels/categories and boundary labels/GEOIDs. |
+| `memberships` | The relationship objects documented above, one per area and municipality GEOID. |
+
+Export validates these provenance fields against its read-only database
+transaction and current rules. Missing/stale preparation stops export with an
+instruction to run `make prepare`. No public table/map export schema changed.
 
 The UI groups water, wastewater, and soils as infrastructure alternatives. Its
 display-only summary is true if any value is true, false if all are false, and
@@ -238,7 +277,7 @@ null otherwise. It does not replace `likely_eligible`. For the
 `town_growth_development` category, the table displays “Not separately required”
 for zoning and the hover omits zoning; the exported source null is unchanged.
 
-## Relationships and interpretation
+### Relationships and interpretation
 
 Always include `run_id` when joining the stored tables: IDs can repeat across
 captures. Relationships are implemented through these shared columns; the
@@ -258,26 +297,202 @@ Counts across views or services should not be added as unique real-world areas.
 The current capture has **14 missing geometries** and **908 invalid geometries**,
 all retained. The **2,401 unmapped records** also remain available; some are
 alternate source copies, while others have missing/nonstandard classifications.
-See [SOURCE_INVENTORY.md](SOURCE_INVENTORY.md) for coverage and source caveats.
+See [dated source findings](#dated-source-findings) below.
 
-## Example queries
+## Dated source findings
 
-Run `LOAD spatial;` once per DuckDB connection before using spatial functions
-(the extension is already installed in the project's current environment).
+### September 8, 2026
 
-```sql
--- Eligibility, criteria, and geometry for each interim area.
-SELECT name, likely_eligible, zoning_bylaws, drinking_water,
-       sewer_wastewater, adequate_soils, ST_AsGeoJSON(geom) AS geometry
-FROM interim_areas;
+Capture `20260908T190421.271250Z` contains **18,110 source features**, downloaded
+from **25 distinct ArcGIS layer URLs**, with **60 logical map layers**. These
+are source-feature counts, not municipalities, connected polygons, or unique
+real-world areas. A source feature can be a multipart geometry. Different
+services can contain copies of the same area.
 
--- Access a source attribute that has no dedicated column.
-SELECT rpc, tier_code, raw_properties->>'NOTES' AS source_notes
-FROM tier_approved;
+The full source URLs, map configuration, filters, and field domains are stored
+in the snapshot manifest and in `ingest_sources` / `ingest_layers`. Local data:
+`data/act181_ingest.duckdb`, with raw files in
+`in/snapshots/20260908T190421.271250Z/`.
 
--- Find each logical layer's source and published record count.
-SELECT l.rpc, l.kind, l.stage, l.feature_count, s.url
-FROM current_layers l
-JOIN ingest_sources s USING (run_id, source_id)
-ORDER BY l.rpc, l.kind, l.stage;
-```
+This is a historical inventory of the first capture. The current
+boundary-enabled capture is `20260908T222348.634248Z` and adds VCGI's BNDHASH
+town and RPC items (256 and 11 polygons, respectively). The historical counts
+above remain unchanged so dated source findings stay reproducible.
+
+### Interim exemption areas
+
+The [interim web map](https://www.arcgis.com/home/item.html?id=e1b2aaa4aac344cea6d249737abaa45f)
+uses these queryable layers of the state ANR service:
+
+| Layer | Records | Likely eligible | Likely not eligible |
+|---|---:|---:|---:|
+| [Downtown District Area — 6](https://anrmaps.vermont.gov/arcgis/rest/services/map_services/MAP_ACCD_DHCD_WM_NOCACHE/MapServer/6) | 25 | 24 | 1 |
+| [Town and Growth Centers & Development Areas — 7](https://anrmaps.vermont.gov/arcgis/rest/services/map_services/MAP_ACCD_DHCD_WM_NOCACHE/MapServer/7) | 40 | 40 | 0 |
+| [Village Center & Buffer — 11](https://anrmaps.vermont.gov/arcgis/rest/services/map_services/MAP_ACCD_DHCD_WM_NOCACHE/MapServer/11) | 254 | 150 | 104 |
+| Total | 319 | 214 | 105 |
+
+Eligibility comes from `ExemptionApplied_Y_N_`, also used by the viewer's
+renderer and popup. The town/growth/development layer lacks a zoning/bylaws
+field. Forty village buffers have NULL drinking-water status. These values
+remain NULL in the structured data. No eligibility rules are inferred.
+
+### FLU and Tier 1B stage views
+
+The [FLU web map](https://www.arcgis.com/home/item.html?id=509abf408c8a4e31964edefd997c1e84)
+combines statewide services with individual RPC sources. Published map
+membership yields the following counts, including records without geometry:
+
+| RPC | FLU pre-app | FLU app | FLU approved | Tier 1B pre-app | Tier 1B app | Tier approved |
+|---|---:|---:|---:|---:|---:|---:|
+| AC | 64 | 0 | 0 | 50 | 0 | 0 |
+| BC | 318 | 0 | 0 | 7 | 0 | 0 |
+| CC | 148 | 168 | 168 | 36 | 41 | 41 |
+| CV | 4,799 | 0 | 0 | 50 | 0 | 0 |
+| LC | 11 | 11 | 0 | 7 | 4 | 0 |
+| MA | 25 | 25 | 0 | 15 | 14 | 0 |
+| NV | 1,289 | 0 | 0 | 67 | 0 | 0 |
+| NW | 1,913 | 1,971 | 1,971 | 56 | 1 | 1 |
+| RR | 304 | 61 | 61 | 31 | 17 | 17 |
+| TR | 794 | 0 | 0 | 44 | 0 | 0 |
+| WR | 650 | 0 | 0 | 44 | 0 | 0 |
+| Total | 10,315 | 2,236 | 2,200 | 407 | 77 | 59 |
+
+Zero means no features returned for that layer/filter at capture time. It does
+not establish that a region has not submitted an application elsewhere.
+All 59 approved tier records currently have `TIER_AREA = '1B'`.
+
+Approved data comes from separate public services:
+
+- [Approved tier areas](https://services1.arcgis.com/rnCtPMpypTkqwvYT/arcgis/rest/services/LURB_ApprovedTierMap_Poly_SP_Public/FeatureServer/0).
+- [Approved FLU areas](https://services1.arcgis.com/rnCtPMpypTkqwvYT/arcgis/rest/services/LURB_ApprovedFLUAreas_Poly_SP_Public/FeatureServer/1),
+  discovered through the state publisher's ArcGIS catalog. This service was
+  absent from the viewer's approved group.
+
+Approved records retain `APP` submission versions and have `APR` LURB status.
+The application layers include approved records; these stages are not
+mutually exclusive. Matching counts do not prove unchanged geometry between
+submission and approval. Earlier submission geometry may have been edited in
+place and cannot be reconstructed from this capture alone.
+
+The capture also preserves 90 source hamlet points (92 map memberships because
+the Lamoille point source appears under both stages) and 6 records from the
+under-review Tier 1A source.
+
+### Retained source irregularities
+
+- **14 records lack returned geometry**, including four approved FLU records
+  also present in the statewide FLU service. A native ArcGIS JSON query for
+  approved FLU object 19439 also returned no geometry, confirming this example
+  is absent at the source rather than lost in GeoJSON conversion.
+- **908 records fail DuckDB spatial validity checks.** They retain their
+  returned geometry with `geometry_valid = false`. Geometry repair, if needed
+  for later intersections, should create a derived geometry with an audit trail.
+- **2,401 source records do not match any selected map-layer filter**:
+  1,916 FLU and 485 tier records. These remain in `unmapped_features`. Examples
+  include the statewide NW pre-application FLU copy (the viewer uses an RPC
+  source instead), missing RPC/version fields, and non-Tier-1B records excluded
+  by the Chittenden application filter. No old Windham repair heuristic is applied.
+
+These counts include copies across services, so they are not counts of distinct
+real-world defects. All 18,110 downloaded records were loaded; flagged and
+unmapped records were not discarded.
+
+## Municipality decisions
+
+Approved September 12, 2026 against the saved capture. `transform.py` normalizes
+case/whitespace and applies the exceptions in `config.py`; geographic overlap
+never supplies a fallback. Unknown labels and ambiguous/missing target GEOIDs
+stop preparation. Source labels and geometries are preserved. The table groups
+by source labels; map summaries count official municipality GEOIDs.
+
+| Source label (case-insensitive) | Approved municipality membership | Records | Basis / scope |
+|---|---|---:|---|
+| ALGIERS | Guilford | 1 | Locality; saved polygon lies in Guilford. |
+| ENOSBURG | Enosburgh | 1 | Spelling; Enosburg Falls polygon lies in Enosburgh. |
+| ESSEX TOWN | Essex | 1 | Town suffix; do not merge Essex Junction. |
+| FERRISBURG | Ferrisburgh | 1 | Spelling variant. |
+| GREENSBORRO | Greensboro | 2 | Misspelling; both named Greensboro centers. Greensboro Bend also extends into three neighbors; those intersections do not create membership. |
+| JERICHO\UNDERHILL | Jericho + Underhill | 1 | Explicit shared label and user confirmation: one area, two memberships. |
+| MIDDLETOWN | Middletown Springs | 1 | Full town name; area name is Middletown Springs Village Center. |
+| N HERO | North Hero | 1 | Abbreviation. |
+| Rutland | Rutland City | 3 | Feature-specific rule for the three current NDA records (IDs 21, 22, 23), all wholly within Rutland City. Do not assume every future “Rutland” label means the city. |
+| S SHAFTSBURY | Shaftsbury | 1 | South Shaftsbury locality. |
+| ST. ALBANS CITY / St. Albans City | Saint Albans City | 2 | Saint expansion; preserve city/town distinction. |
+| ST. ALBANS TOWN | Saint Albans Town | 1 | Saint expansion; preserve city/town distinction. |
+| ST. JOHNSBURY / St. Johnsbury | Saint Johnsbury | 2 | Saint expansion. |
+| TYSON | Plymouth | 1 | Plymouth is the approved designation owner; the buffer also crosses Ludlow. |
+| VILLAGE OF MANCHESTER | Manchester | 1 | Village is represented within Manchester by this municipal-boundary dataset. |
+| West Brattleboro | Brattleboro | 1 | Locality; current NDA is wholly in Brattleboro. |
+
+Riverside/Underhill Flats (`a8a69a8957ab82c6:50`) belongs to both Jericho and
+Underhill: two relationships referencing one unchanged source feature. This
+accounts for 320 relationships across 319 source areas.
+
+Tyson is assigned to Plymouth as the designation owner. Its buffered geometry
+crosses Ludlow; this assignment does not claim the whole buffer lies in Plymouth.
+Plymouth's site and zoning ordinance identify Tyson as its designated center;
+Ludlow's plan describes the hamlet as straddling the town line. The approved
+choice was Plymouth-only membership. Adding Ludlow would not change the town
+totals in this capture because Ludlow already has another likely eligible area.
+
+Sources: [Plymouth official site](https://plymouthvt.org/wordpress/), [Plymouth zoning ordinance](https://plymouthvt.org/wordpress/wp-content/uploads/2023/03/PLYMOUTH-ZONING-ORDINANCE-ADOPTED-5-21-2024.pdf), [Ludlow plan](https://www.ludlow.vt.us/vertical/sites/%7B78E8DA21-0D46-4486-AF59-9D2B5A1048F3%7D/uploads/Planning_Commission_March_Agenda__Supporting_Documents1.pdf). The source references `VDtyson.pdf`; that original designation map was not retrieved during this review.
+
+### Recorded September 12 comparison
+
+All 319 areas had source labels: 298 matched by case/whitespace normalization,
+and 21 required the 16 exception rules above. Intersections were used only as
+an audit diagnostic. The recorded comparison with the prior spatial method was:
+
+| Municipality summary | Prior intersection method | Approved membership |
+|---|---:|---:|
+| With designated areas | 195 | 187 |
+| With a likely eligible area | 126 | 118 |
+| With areas, none likely eligible | 69 | 69 |
+| No designated areas | 61 | 69 |
+
+| Municipality | Prior intersection method | Approved membership |
+|---|---|---|
+| Dummerston | Likely eligible area | No designated areas |
+| Fayston | Likely eligible area | No designated areas |
+| Jamaica | Likely eligible area | Areas, none likely eligible |
+| Johnson | Likely eligible area | Areas, none likely eligible |
+| Leicester | Likely eligible area | No designated areas |
+| Mount Holly | Likely eligible area | Areas, none likely eligible |
+| Mount Tabor | Areas, none likely eligible | No designated areas |
+| Ryegate | Likely eligible area | Areas, none likely eligible |
+| Sheffield | Areas, none likely eligible | No designated areas |
+| Stannard | Areas, none likely eligible | No designated areas |
+| Sutton | Likely eligible area | No designated areas |
+| Walden | Areas, none likely eligible | No designated areas |
+
+The exhaustive unchanged-name mapping is available in the exported `memberships`
+array; it is not duplicated here.
+
+## Dashboard export contract
+
+`analyze.py` reads DuckDB in one read-only transaction and validates the prepared
+membership file against the capture, rule values/version, and input fingerprint.
+It serializes a complete generation before replacing `out/dashboard/data`.
+Replacement failure restores the previous directory. Use one local writer at a
+time: directory replacement has a short missing-path window and is not a
+crash-durable publication protocol.
+
+All datasets carry `schema_version`, `snapshot_id`, `captured_at`, `exported_at`,
+`source_view`, and `source_urls`. `manifest.json` lists the registered datasets.
+`interim-areas.json` (schema 1) contains counts and ordered municipality groups
+with all source features and true/false/null eligibility and criteria. Geometry
+is excluded. `map.json` (schema 2) contains separate GeoJSON collections for
+areas, towns, and RPCs, plus the prepared relationships and membership provenance.
+The map and table retain their existing public schemas.
+
+The page builder checks matching snapshot/capture/export identities before
+embedding the table, map, CSS, JavaScript, logo, and vendored Leaflet. JSON is
+escaped for safe HTML embedding, and finished HTML replaces the previous page
+only after validation succeeds. Street tiles remain an optional online resource.
+
+Display order is municipality A–Z, then downtown districts, village centers/buffers,
+and town/growth/development areas, with names A–Z within each category. Filters
+recompute visible row spans and counts without changing order. Yes is pale blue,
+No pale red, and Unknown gray. Publisher eligibility is never recalculated.
+Infrastructure summarizes water/wastewater/soils with three-valued OR; development
+areas display zoning as not separately required while retaining the source null.

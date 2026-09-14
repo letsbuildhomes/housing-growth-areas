@@ -1,500 +1,381 @@
+"""Load saved snapshots and prepare municipality relationships without downloads."""
+import argparse
+import hashlib
 import json
-import os
+from pathlib import Path
 import tempfile
-from datetime import datetime, timezone
 
 import duckdb
-
 import config
+from arcgis import object_id_field
+from config import DB_PATH, MEMBERSHIP_PATH, MEMBERSHIP_VERSION, ALIASES, RUTLAND_FEATURES
 
 
-def is_windham_orphan(props):
-    if (props.get("RPC") or "").strip() != "":
-        return False
-    if (props.get("TIER_VERS") or "").strip() != "":
-        return False
-    if (props.get("SUBMITTER") or "").strip() != "":
-        return False
-    if (props.get("TIER_AREA") or "").strip() != "1B":
-        return False
-    creator = (props.get("Creator") or "").strip().lower()
-    if not creator.startswith("wrcgis"):
-        return False
-    return True
+# File validation and publication
+
+def sha256(path):
+    with path.open('rb') as stream:
+        digest = hashlib.sha256()
+        for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
-def clean_val(val, target_field=None):
-    if val is None:
-        return None
-    if isinstance(val, (int, float)) and val > 1000000000000:
+def json_text(value):
+    return json.dumps(value, ensure_ascii=False, allow_nan=False, indent=2) + '\n'
+
+
+def write_json(path, value):
+    path = Path(path)
+    content = json_text(value)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=path.parent,
+                                     delete=False) as stream:
+        temp = Path(stream.name)
         try:
-            return datetime.fromtimestamp(val / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
-        except Exception:
-            return None
-    if isinstance(val, str):
-        val = val.strip()
-        if not val:
-            return None
-        if val in config.VERSION_NORMALIZE:
-            return config.VERSION_NORMALIZE[val]
-        if val in config.RPC_NAME_TO_CODE:
-            return config.RPC_NAME_TO_CODE[val]
-        if target_field in ("flu_code", "tier_code") and val in config.FLU_NAME_TO_CODE:
-            return config.FLU_NAME_TO_CODE[val]
-    return val
+            stream.write(content)
+            stream.close()
+            temp.replace(path)
+        finally:
+            temp.unlink(missing_ok=True)
 
 
-def load_geojson(path):
-    with open(path) as f:
-        data = json.load(f)
-    return data.get("features", [])
+# Snapshot normalization and database loading
+
+def pick(properties, *names):
+    for name in names:
+        value = properties.get(name)
+        if isinstance(value, str):
+            value = value.strip() or None
+        if value is not None:
+            return value
+    return None
 
 
-def build_flu_rows(source_key, features, field_map):
-    rows = []
-    for feat in features:
-        geom = feat.get("geometry")
-        if not geom or not geom.get("type"):
-            continue
-        props = feat.get("properties") or {}
-        oid = props.get("OBJECTID", props.get("FID", 0))
-        row = {
-            "id": f"{source_key}::{oid}",
-            "geom_json": json.dumps(geom),
-            "source_layer": source_key,
-        }
-        for src_field, tgt_field in field_map.items():
-            if tgt_field is None:
-                continue
-            if tgt_field == "source_oid":
-                row[tgt_field] = props.get(src_field)
-            else:
-                val = props.get(src_field)
-                if isinstance(val, str):
-                    val = val.strip() or None
-                row[tgt_field] = clean_val(val, tgt_field) if val is not None else None
-        if row.get("version") is None and source_key.endswith("_pre"):
-            row["version"] = "PRE"
-        for c in config.FLU_COLUMNS:
-            if c not in row and c != "geom":
-                row[c] = None
-        rows.append(row)
-    return rows
+def boolean(value):
+    return {'Y': True, 'YES': True, 'N': False, 'NO': False}.get(str(value).strip().upper())
 
 
-def build_tier_rows(source_key, features, field_map):
-    rows = []
-    windham_repaired = 0
-    for feat in features:
-        geom = feat.get("geometry")
-        if not geom or not geom.get("type"):
-            continue
-        props = feat.get("properties") or {}
-        is_orphan = False
-        if source_key == "tier_consolidated" and is_windham_orphan(props):
-            props = dict(props)
-            props["RPC"] = "WR"
-            props["TIER_VERS"] = None
-            props["SUBMITTER"] = None
-            is_orphan = True
-            windham_repaired += 1
-        oid = props.get("OBJECTID", props.get("FID", 0))
-        row = {
-            "id": f"{source_key}::{oid}",
-            "geom_json": json.dumps(geom),
-            "source_layer": source_key,
-        }
-        for src_field, tgt_field in field_map.items():
-            if tgt_field is None:
-                continue
-            if tgt_field == "source_oid":
-                row[tgt_field] = props.get(src_field)
-            else:
-                val = props.get(src_field)
-                if isinstance(val, str):
-                    val = val.strip() or None
-                row[tgt_field] = clean_val(val, tgt_field) if val is not None else None
-        if is_orphan:
-            row["rpc"] = "WR"
-            row["version"] = None
-            row["submitter"] = None
-            notes_val = (props.get("NOTES") or "")
-            if notes_val in config.WINDHAM_TOWNS:
-                row["notes"] = notes_val
-        if source_key in config.TIER1B_SOURCES:
-            row["tier_code"] = "1B"
-        if row.get("version") is None and source_key.endswith("_pre"):
-            row["version"] = "PRE"
-        for c in config.TIER_COLUMNS:
-            if c not in row and c != "geom":
-                row[c] = None
-        rows.append(row)
-    if windham_repaired:
-        print(f"  Repaired {windham_repaired} Windham orphan features")
-    return rows
+def decoded_properties(properties, meta):
+    result = dict(properties)
+    for field in meta['fields']:
+        labels = {v['code']: v['name'] for v in (field.get('domain') or {}).get('codedValues', [])}
+        value = properties.get(field['name'])
+        if value in labels:
+            result[field['name']] = labels[value]
+    return result
 
 
-def build_boundary_rows(source_key, features, field_map):
-    boundary_type = "unknown"
-    for suffix, bt in config.BOUNDARY_TYPE_MAP.items():
-        if source_key.endswith(suffix):
-            boundary_type = bt
-            break
-    rows = []
-    for feat in features:
-        geom = feat.get("geometry")
-        if not geom or not geom.get("type"):
-            continue
-        props = feat.get("properties") or {}
-        oid = props.get("OBJECTID", 0)
-        row = {
-            "id": f"{source_key}::{oid}",
-            "geom_json": json.dumps(geom),
-            "boundary_type": boundary_type,
-            "source_layer": source_key,
-        }
-        for src_field, tgt_field in field_map.items():
-            if tgt_field is None:
-                continue
-            if tgt_field == "source_oid":
-                row[tgt_field] = props.get(src_field)
-            else:
-                val = props.get(src_field)
-                if isinstance(val, str):
-                    val = val.strip() or None
-                row[tgt_field] = val
-        for c in config.BOUNDARY_COLUMNS:
-            if c not in row and c != "geom":
-                row[c] = None
-        rows.append(row)
-    return rows
+def normalize(feature, meta, source, layers, run_id):
+    props = feature['properties']
+    sid = source['source_id']
+    oid = props[object_id_field(meta)]
+    contexts = [l for l in layers if l['source_id'] == sid]
+    kinds = {l['kind'] for l in contexts}
+    if len(kinds) != 1:
+        raise RuntimeError(f'Conflicting source kinds: {source["url"]}')
+    kind = next(iter(kinds))
+    rpc = pick(props, 'RPC_CODE', 'RPC')
+    rpc = config.RPC_NAME_TO_CODE.get(rpc, rpc)
+    if rpc is None:
+        hints = {l['rpc'] for l in contexts if l['rpc']}
+        if len(hints) == 1:
+            rpc = next(iter(hints))
+    version = pick(props, 'TIER_VERS', 'VERS_RPC', 'VERSION')
+    version = config.VERSION_NORMALIZE.get(version, version)
+    flu_code = pick(props, 'FLU_AREA', 'FLU_Area')
+    flu_code = config.FLU_NAME_TO_CODE.get(flu_code, flu_code)
+    tier_code = pick(props, 'TIER_AREA')
+    if tier_code is None and kind == 'tier' and all(l['path'][-1] == 'Tier 1B' for l in contexts):
+        tier_code = '1B'
+    category = contexts[0]['category']
+    water_field = 'DW_Status' if category == 'village_center_buffer' else 'Water'
+    sewer_field = 'WW_Status' if category == 'village_center_buffer' else 'Sewer'
+    eligibility = pick(props, 'ExemptionApplied_Y_N_')
+    eligible = boolean(eligibility)
+    name = (pick(props, 'TOWNNAMEMC', 'TOWNNAME') if kind == 'municipality_boundary' else
+            pick(props, 'LONGNAME', 'SHORTNAME', 'RPC') if kind == 'rpc_boundary' else
+            pick(props, 'DIS_NAME', 'CommunityName', 'NAME', 'TOWNNAME', 'TOWN_NAME', 'MUNI'))
+    municipality = (pick(props, 'TOWNNAMEMC', 'TOWNNAME') if kind == 'municipality_boundary'
+                    else pick(props, 'TOWNNAME', 'TOWN_NAME', 'MUNI'))
+    return dict(
+        run_id=run_id, feature_id=f'{sid}:{oid}', source_id=sid, source_oid=str(oid),
+        source_globalid=pick(props, 'GlobalID', 'GLOBALID'), kind=kind, category=category, rpc=rpc,
+        name=name, municipality=municipality, geoid=pick(props, 'GEOID', 'TOWNGEOID'),
+        flu_code=flu_code, tier_code=tier_code, submission_version=version,
+        lurb_status=pick(props, 'LURBSTATUS'), date_lurb=pick(props, 'DATE_LURB'),
+        exemption_type=pick(props, 'ExemptionArea'), exemption_description=pick(props, 'ExemptionAreaDescription'),
+        eligibility_raw=eligibility, likely_eligible=eligible,
+        eligibility_label=('Area likely Exemption Eligible' if eligible is True else
+                           'Area likely NOT Exemption Eligible' if eligible is False else None),
+        zoning_bylaws=boolean(props.get('ZoningAndSubdivisionBylaws')),
+        drinking_water=boolean(props.get(water_field)), sewer_wastewater=boolean(props.get(sewer_field)),
+        adequate_soils=boolean(props.get('AdequateSoils')),
+        criteria_fields={key: field if field in props else None for key, field in {
+            'zoning_bylaws': 'ZoningAndSubdivisionBylaws', 'drinking_water': water_field,
+            'sewer_wastewater': sewer_field, 'adequate_soils': 'AdequateSoils',
+        }.items()} if kind == 'interim' else {},
+        raw_properties=props, decoded_properties=decoded_properties(props, meta),
+        geometry_geojson=feature.get('geometry'),
+    )
 
 
-def build_population_rows(source_key, features, field_map):
-    rows = []
-    for feat in features:
-        props = feat.get("properties") or {}
-        oid = props.get("OBJECTID", 0)
-        row = {
-            "id": f"{source_key}::{oid}",
-            "source_layer": source_key,
-        }
-        for src_field, tgt_field in field_map.items():
-            if tgt_field is None:
-                continue
-            if tgt_field == "source_oid":
-                row[tgt_field] = props.get(src_field)
-            else:
-                val = props.get(src_field)
-                if isinstance(val, str):
-                    val = val.strip() or None
-                row[tgt_field] = val
-        for c in config.POPULATION_COLUMNS:
-            if c not in row:
-                row[c] = None
-        rows.append(row)
-    return rows
+TEXT_COLUMNS = [
+    'run_id', 'feature_id', 'source_id', 'source_oid', 'source_globalid', 'kind',
+    'category', 'rpc', 'name', 'municipality', 'geoid', 'flu_code', 'tier_code',
+    'submission_version', 'lurb_status', 'date_lurb', 'exemption_type',
+    'exemption_description', 'eligibility_raw', 'eligibility_label',
+]
+BOOL_COLUMNS = ['likely_eligible', 'zoning_bylaws', 'drinking_water', 'sewer_wastewater', 'adequate_soils']
+JSON_COLUMNS = ['criteria_fields', 'raw_properties', 'decoded_properties', 'geometry_geojson']
+COLUMN_TYPES = {**{k: 'VARCHAR' for k in TEXT_COLUMNS},
+                **{k: 'BOOLEAN' for k in BOOL_COLUMNS}, **{k: 'JSON' for k in JSON_COLUMNS}}
 
 
-def build_water_rows(source_key, features, field_map):
-    rows = []
-    for feat in features:
-        geom = feat.get("geometry")
-        if not geom or not geom.get("type"):
-            continue
-        props = feat.get("properties") or {}
-        oid = props.get("OBJECTID", 0)
-        row = {
-            "id": f"{source_key}::{oid}",
-            "geom_json": json.dumps(geom),
-            "source_layer": source_key,
-        }
-        for src_field, tgt_field in field_map.items():
-            if tgt_field is None:
-                continue
-            if tgt_field == "source_oid":
-                row[tgt_field] = props.get(src_field)
-            else:
-                val = props.get(src_field)
-                if isinstance(val, str):
-                    val = val.strip() or None
-                row[tgt_field] = val
-        for c in config.WATER_COLUMNS:
-            if c not in row and c != "geom":
-                row[c] = None
-        rows.append(row)
-    return rows
+def initialize(con):
+    con.execute('LOAD spatial')
+    con.execute('''CREATE TABLE IF NOT EXISTS ingest_runs (
+        run_id VARCHAR PRIMARY KEY, started_at TIMESTAMPTZ, completed_at TIMESTAMPTZ,
+        snapshot_path VARCHAR, manifest JSON)''')
+    con.execute('''CREATE TABLE IF NOT EXISTS ingest_sources (
+        run_id VARCHAR, source_id VARCHAR, url VARCHAR, expected_count BIGINT,
+        metadata JSON, PRIMARY KEY(run_id, source_id))''')
+    con.execute('''CREATE TABLE IF NOT EXISTS ingest_layers (
+        run_id VARCHAR, layer_id VARCHAR, source_id VARCHAR, kind VARCHAR,
+        category VARCHAR, stage VARCHAR, rpc VARCHAR, path JSON,
+        definition_expression VARCHAR, definition JSON, feature_count BIGINT,
+        PRIMARY KEY(run_id, layer_id))''')
+    con.execute('''CREATE TABLE IF NOT EXISTS ingest_memberships (
+        run_id VARCHAR, layer_id VARCHAR, feature_id VARCHAR,
+        PRIMARY KEY(run_id, layer_id, feature_id))''')
+    columns = ', '.join(f'{k} {v}' for k, v in COLUMN_TYPES.items())
+    con.execute(f'''CREATE TABLE IF NOT EXISTS ingest_features (
+        {columns}, geom GEOMETRY, geometry_valid BOOLEAN, PRIMARY KEY(run_id, feature_id))''')
+    con.execute('''CREATE OR REPLACE VIEW latest_ingest_run AS
+        SELECT * FROM ingest_runs ORDER BY started_at DESC LIMIT 1''')
+    con.execute('''CREATE OR REPLACE VIEW current_features AS
+        SELECT f.* FROM ingest_features f JOIN latest_ingest_run USING (run_id)''')
+    con.execute('''CREATE OR REPLACE VIEW current_layers AS
+        SELECT l.* FROM ingest_layers l JOIN latest_ingest_run USING (run_id)''')
+    con.execute('''CREATE OR REPLACE VIEW unmapped_features AS
+        SELECT f.* FROM current_features f WHERE NOT EXISTS (
+            SELECT 1 FROM ingest_memberships m
+            WHERE m.run_id = f.run_id AND m.feature_id = f.feature_id)''')
+    con.execute('''CREATE OR REPLACE VIEW map_features AS
+        SELECT f.*, l.layer_id, l.stage AS map_stage, l.rpc AS map_rpc, l.path AS map_path
+        FROM current_features f JOIN ingest_memberships m USING (run_id, feature_id)
+        JOIN current_layers l USING (run_id, layer_id)''')
+    views = {
+        'interim_areas': "kind = 'interim'",
+        'interim_downtown_district': "category = 'downtown_district'",
+        'interim_town_growth_development': "category = 'town_growth_development'",
+        'interim_village_center_buffer': "category = 'village_center_buffer'",
+        'tier1b_pre_application': "kind = 'tier' AND tier_code = '1B' AND map_stage = 'pre_application'",
+        'tier1b_application': "kind = 'tier' AND tier_code = '1B' AND map_stage = 'application'",
+        'tier_approved': "kind = 'tier' AND map_stage = 'approved'",
+        'flu_pre_application': "kind = 'flu' AND map_stage = 'pre_application'",
+        'flu_application': "kind = 'flu' AND map_stage = 'application'",
+        'flu_approved': "kind = 'flu' AND map_stage = 'approved'",
+        'hamlet_features': "kind = 'hamlet'",
+        'municipal_boundaries': "kind = 'municipality_boundary'",
+        'rpc_boundaries': "kind = 'rpc_boundary'",
+    }
+    for name, where in views.items():
+        con.execute(f'CREATE OR REPLACE VIEW {name} AS SELECT * FROM map_features WHERE {where}')
 
 
-def bulk_load(duck, rows, table, columns):
-    if not rows:
-        return 0
-    tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)
-    json.dump(rows, tmp)
-    tmp.close()
-    select_parts = []
-    for c in columns:
-        if c == "geom":
-            select_parts.append("ST_GeomFromGeoJSON(geom_json)")
+def load_snapshot(directory, db_path=DB_PATH):
+    directory = Path(directory).resolve()
+    manifest = json.loads((directory / 'manifest.json').read_text())
+    if manifest['schema_version'] != 1:
+        raise RuntimeError('Unsupported snapshot schema')
+    for name, expected in manifest['files'].items():
+        if sha256(directory / name) != expected:
+            raise RuntimeError(f'Snapshot checksum mismatch: {name}')
+    run_id = manifest['run_id']
+    db_path = Path(db_path)
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    con = duckdb.connect(str(db_path))
+    try:
+        initialize(con)
+        con.execute('BEGIN TRANSACTION')
+        for table in ['ingest_memberships', 'ingest_features', 'ingest_layers', 'ingest_sources', 'ingest_runs']:
+            con.execute(f'DELETE FROM {table} WHERE run_id = ?', [run_id])
+        con.execute('INSERT INTO ingest_runs VALUES (?, ?, ?, ?, ?)', [
+            run_id, manifest['started_at'], manifest['completed_at'], str(directory), json.dumps(manifest),
+        ])
+        layers = manifest['layers']
+        for source in manifest['sources']:
+            sid = source['source_id']
+            meta = json.loads((directory / (sid + '_meta.json')).read_text())
+            features = json.loads((directory / (sid + '.geojson')).read_text())['features']
+            if len(features) != source['count']:
+                raise RuntimeError(f'Snapshot count mismatch: {sid}')
+            con.execute('INSERT INTO ingest_sources VALUES (?, ?, ?, ?, ?)',
+                        [run_id, sid, source['url'], source['count'], json.dumps(meta)])
+            # Explicit types preserve all-null fields, GEOIDs and source dates.
+            scratch = tempfile.TemporaryDirectory(prefix='act181-normalized-')
+            row_path = Path(scratch.name) / 'normalized.ndjson'
+            try:
+                with row_path.open('w') as stream:
+                    for feature in features:
+                        stream.write(json.dumps(normalize(feature, meta, source, layers, run_id)) + '\n')
+                if features:
+                    columns = ', '.join(COLUMN_TYPES)
+                    types_sql = '{' + ','.join(f"'{k}':'{v}'" for k, v in COLUMN_TYPES.items()) + '}'
+                    con.execute(f'''INSERT INTO ingest_features
+                        SELECT {columns}, ST_GeomFromGeoJSON(geometry_geojson),
+                            ST_IsValid(ST_GeomFromGeoJSON(geometry_geojson))
+                        FROM read_json(?, format='newline_delimited', columns={types_sql},
+                                       maximum_object_size=100000000)''', [str(row_path)])
+            finally:
+                scratch.cleanup()
+            for layer in (l for l in layers if l['source_id'] == sid):
+                ids = source['memberships'][layer['layer_id']]
+                con.execute('INSERT INTO ingest_layers VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', [
+                    run_id, layer['layer_id'], sid, layer['kind'], layer['category'], layer['stage'],
+                    layer['rpc'], json.dumps(layer['path']), layer['where'],
+                    json.dumps(layer['map_definition']), len(ids),
+                ])
+                if ids:
+                    con.execute('''INSERT INTO ingest_memberships
+                        SELECT ?, ?, ? || ':' || CAST(oid AS VARCHAR) FROM unnest(?) AS t(oid)''',
+                        [run_id, layer['layer_id'], sid, ids])
+        missing = con.execute('''SELECT count(*) FROM ingest_memberships m
+            LEFT JOIN ingest_features f USING (run_id, feature_id)
+            WHERE m.run_id = ? AND f.feature_id IS NULL''', [run_id]).fetchone()[0]
+        if missing:
+            raise RuntimeError(f'{missing} memberships refer to missing features')
+        expected = sum(s['count'] for s in manifest['sources'])
+        actual = con.execute('SELECT count(*) FROM ingest_features WHERE run_id = ?', [run_id]).fetchone()[0]
+        if actual != expected:
+            raise RuntimeError(f'Database count mismatch: {actual} != {expected}')
+        con.execute('COMMIT')
+        print(f'Loaded {actual} source features from {len(manifest["sources"])} services into {db_path}')
+        for row in con.execute('''SELECT kind, map_stage, count(*) FROM map_features
+                                  GROUP BY ALL ORDER BY 1,2''').fetchall():
+            print(' ', *row)
+        issues = con.execute('''SELECT count(*) FILTER (WHERE geom IS NULL),
+            count(*) FILTER (WHERE geometry_valid = false) FROM current_features''').fetchone()
+        print(f'Geometry: {issues[0]} missing, {issues[1]} invalid (retained without alteration)')
+    finally:
+        con.close()
+
+
+# Municipality relationships
+
+def normalize_label(value):
+    return ' '.join((value or '').split()).casefold()
+
+
+def derive_memberships(areas, towns):
+    """Return one relationship per source area and official municipality GEOID.
+
+    Missing labels, targets, ambiguous boundaries, or unreviewed Rutland records
+    fail explicitly. Geometry is not consulted, even when it is missing.
+    """
+    by_name, geoids = {}, set()
+    for town in towns:
+        key, geoid = normalize_label(town['municipality']), town['geoid']
+        if not key or not geoid or key in by_name or geoid in geoids:
+            raise ValueError(f'Ambiguous/missing municipality name or GEOID: {town}')
+        by_name[key] = town
+        geoids.add(geoid)
+    result, seen = [], set()
+    for area in areas:
+        fid, key = area['feature_id'], normalize_label(area['municipality'])
+        if fid in seen:
+            raise ValueError(f'Duplicate source area: {fid}')
+        seen.add(fid)
+        if key == 'rutland':
+            if fid not in RUTLAND_FEATURES or area['category'] != 'town_growth_development':
+                raise ValueError(f'Review municipality membership for {fid}: Rutland')
+            targets, method = ('Rutland City',), 'approved_feature_override'
+        elif key in ALIASES:
+            targets, method = ALIASES[key], 'approved_alias'
+        elif key in by_name:
+            targets, method = (by_name[key]['municipality'],), 'normalized_exact'
         else:
-            select_parts.append(c)
-    col_list = ", ".join(columns)
-    sel = ", ".join(select_parts)
-    duck.execute(f"""
-        INSERT INTO {table} ({col_list})
-        SELECT {sel}
-        FROM read_json_auto('{tmp.name}', maximum_object_size=500000000)
-    """)
-    os.unlink(tmp.name)
-    return len(rows)
+            raise ValueError(f'Review municipality membership for {fid}: {area["municipality"]!r}')
+        for target in targets:
+            town = by_name.get(normalize_label(target))
+            if town is None:
+                raise ValueError(f'Missing approved municipality target {target} for {fid}')
+            result.append({'feature_id': fid, 'source_municipality': area['municipality'],
+                           'municipality': town['municipality'], 'municipality_geoid': town['geoid'],
+                           'method': method})
+    return result
 
 
-CREATE_TABLES_SQL = [
-    """CREATE TABLE IF NOT EXISTS flu_areas (
-        id VARCHAR, geom GEOMETRY, flu_code VARCHAR, name VARCHAR,
-        rpc VARCHAR, version VARCHAR, submitter VARCHAR, geoid VARCHAR,
-        desig_center_step VARCHAR, desig_type VARCHAR, lurb_status VARCHAR,
-        date_rpc VARCHAR, date_lurb VARCHAR, date_agg VARCHAR, notes VARCHAR,
-        lu_auth VARCHAR, source_layer VARCHAR, source_oid BIGINT
-    )""",
-    """CREATE TABLE IF NOT EXISTS tier_areas (
-        id VARCHAR, geom GEOMETRY, tier_code VARCHAR,
-        rpc VARCHAR, version VARCHAR, submitter VARCHAR, geoid VARCHAR,
-        lurb_status VARCHAR, date_subm VARCHAR, date_lurb VARCHAR,
-        date_agg VARCHAR, notes VARCHAR, source_layer VARCHAR, source_oid BIGINT
-    )""",
-    """CREATE TABLE IF NOT EXISTS boundary_areas (
-        id VARCHAR, geom GEOMETRY, boundary_type VARCHAR,
-        name VARCHAR, geoid VARCHAR, rpc_code VARCHAR, source_layer VARCHAR,
-        source_oid BIGINT
-    )""",
-    """CREATE TABLE IF NOT EXISTS water_areas (
-        id VARCHAR, geom GEOMETRY, source_name VARCHAR, wbid VARCHAR,
-        lakeid VARCHAR, event_type VARCHAR, gis_acres DOUBLE,
-        source_layer VARCHAR, source_oid BIGINT
-    )""",
-    """CREATE TABLE IF NOT EXISTS population (
-        id VARCHAR, geoid VARCHAR, name VARCHAR,
-        total_pop BIGINT, pop_18_over BIGINT,
-        housing_units BIGINT, occupied_housing BIGINT,
-        source_layer VARCHAR, source_oid BIGINT
-    )""",
-]
+MEMBERSHIP_BASIS = 'recorded municipality with approved crosswalk; no spatial fallback'
 
-MATERIALIZATION_SQL = [
-    # Per-RPC unions
-    """CREATE TABLE rpc_growth_union AS
-       SELECT rpc, ST_Union_Agg(geom) AS geom
-       FROM flu_areas
-       WHERE flu_code IN ('DC','VC','VA','PGA') AND rpc IS NOT NULL AND rpc != ''
-       GROUP BY rpc""",
-    """CREATE TABLE rpc_tier_union AS
-       SELECT rpc, version, ST_Union_Agg(geom) AS geom
-       FROM tier_areas
-       WHERE tier_code = '1B' AND rpc IS NOT NULL AND rpc != ''
-       GROUP BY rpc, version""",
-    """CREATE TABLE rpc_tier_any AS
-       SELECT rpc, ST_Union_Agg(geom) AS geom
-       FROM rpc_tier_union
-       GROUP BY rpc""",
-    # Statewide unions (from per-RPC unions where possible)
-    """CREATE TABLE statewide_growth AS
-       SELECT ST_Union_Agg(geom) AS geom FROM rpc_growth_union""",
-    """CREATE TABLE statewide_tier AS
-       SELECT ST_Union_Agg(geom) AS geom FROM tier_areas WHERE tier_code = '1B'""",
-    """CREATE TABLE statewide_pre AS
-       SELECT ST_Union_Agg(geom) AS geom FROM rpc_tier_union WHERE version = 'PRE'""",
-    """CREATE TABLE statewide_app AS
-       SELECT ST_Union_Agg(geom) AS geom FROM rpc_tier_union WHERE version = 'APP'""",
-    # Per-FLU-code unions
-    """CREATE TABLE flu_code_unions AS
-       SELECT flu_code, ST_Union_Agg(geom) AS geom
-       FROM flu_areas
-       WHERE flu_code IN ('DC','VC','VA','PGA')
-       GROUP BY flu_code""",
-    # Water unions
-    """CREATE TABLE statewide_water AS
-       SELECT ST_Union_Agg(geom) AS geom FROM water_areas""",
-    """CREATE TABLE statewide_tier_water AS
-       SELECT ST_CollectionExtract(ST_Intersection(t.geom, w.geom), 3) AS geom
-       FROM statewide_tier t, statewide_water w""",
-    """CREATE TABLE statewide_growth_water AS
-       SELECT ST_CollectionExtract(ST_Intersection(g.geom, w.geom), 3) AS geom
-       FROM statewide_growth g, statewide_water w""",
-    """CREATE TABLE statewide_pre_water AS
-       SELECT ST_CollectionExtract(ST_Intersection(t.geom, w.geom), 3) AS geom
-       FROM statewide_pre t, statewide_water w""",
-    """CREATE TABLE statewide_app_water AS
-       SELECT ST_CollectionExtract(ST_Intersection(t.geom, w.geom), 3) AS geom
-       FROM statewide_app t, statewide_water w""",
-]
 
-PRE_INTERSECT_SQL = [
-    # RPC stats: each RPC boundary intersected with growth/pre/app statewide unions
-    """CREATE TABLE rpc_stats_data AS
-       SELECT r.name, r.rpc_code, r.geom AS rpc_geom,
-              ST_Intersection(r.geom, g.geom) AS growth_geom,
-              ST_Intersection(r.geom, p.geom) AS pre_geom,
-              ST_Intersection(r.geom, a.geom) AS app_geom,
-              ST_CollectionExtract(ST_Intersection(r.geom, w.geom), 3) AS rpc_water_geom,
-              ST_CollectionExtract(ST_Intersection(r.geom, gw.geom), 3) AS growth_water_geom,
-              ST_CollectionExtract(ST_Intersection(r.geom, pw.geom), 3) AS pre_water_geom,
-              ST_CollectionExtract(ST_Intersection(r.geom, aw.geom), 3) AS app_water_geom
-       FROM boundary_areas r, statewide_growth g, statewide_pre p, statewide_app a,
-            statewide_water w, statewide_growth_water gw, statewide_pre_water pw, statewide_app_water aw
-       WHERE r.boundary_type = 'rpc'""",
-    # FLU-tier stats: each FLU code intersected with tier union
-    """CREATE TABLE flu_tier_data AS
-       SELECT f.flu_code, f.geom AS total_geom,
-              COALESCE(ST_Intersection(f.geom, t.geom),
-                       ST_GeomFromText('GEOMETRYCOLLECTION EMPTY')) AS overlap_geom,
-              ST_CollectionExtract(ST_Intersection(f.geom, w.geom), 3) AS total_water_geom,
-              ST_CollectionExtract(ST_Intersection(ST_Intersection(f.geom, t.geom), w.geom), 3) AS overlap_water_geom
-       FROM flu_code_unions f, statewide_tier t, statewide_water w
-       UNION ALL
-       SELECT 'ALL', g.geom,
-              COALESCE(ST_Intersection(g.geom, t.geom),
-                       ST_GeomFromText('GEOMETRYCOLLECTION EMPTY')),
-              ST_CollectionExtract(ST_Intersection(g.geom, w.geom), 3),
-              ST_CollectionExtract(ST_Intersection(ST_Intersection(g.geom, t.geom), w.geom), 3)
-       FROM statewide_growth g, statewide_tier t, statewide_water w""",
-    # Town-tier-water stats: per-town tier overlap and water intersections
-    """CREATE TABLE town_tier_stats_data AS
-       SELECT b.name, b.geoid,
-              b.geom AS town_geom,
-              ST_CollectionExtract(ST_Intersection(b.geom, st.geom), 3) AS tier_overlap_geom,
-              ST_CollectionExtract(ST_Intersection(b.geom, w.geom), 3) AS water_geom,
-              ST_CollectionExtract(ST_Intersection(b.geom, tw.geom), 3) AS tier_water_geom
-       FROM boundary_areas b, statewide_tier st, statewide_water w, statewide_tier_water tw
-       WHERE b.boundary_type = 'town'""",
-    # Full overlay: per-RPC growth split by tier status
-    """CREATE TABLE overlay_results AS
-       WITH rpc_app_overlap AS (
-           SELECT g.rpc, ST_Intersection(g.geom, a.geom) AS geom
-           FROM rpc_growth_union g
-           JOIN rpc_tier_union a ON a.rpc = g.rpc AND a.version = 'APP'
-       ),
-       rpc_pre_overlap AS (
-           SELECT g.rpc,
-               CASE WHEN a.rpc IS NOT NULL
-                   THEN ST_Difference(ST_Intersection(g.geom, p.geom), a.geom)
-                   ELSE ST_Intersection(g.geom, p.geom)
-               END AS geom
-           FROM rpc_growth_union g
-           JOIN rpc_tier_union p ON p.rpc = g.rpc AND p.version = 'PRE'
-           LEFT JOIN rpc_tier_union a ON a.rpc = g.rpc AND a.version = 'APP'
-       ),
-       rpc_no_tier AS (
-           SELECT g.rpc,
-               ST_Difference(g.geom, COALESCE(ta.geom, ST_GeomFromText('MULTIPOLYGON EMPTY'))) AS geom
-           FROM rpc_growth_union g
-           LEFT JOIN rpc_tier_any ta ON ta.rpc = g.rpc
-       )
-       SELECT g.rpc, g.geom AS growth_geom,
-              ao.geom AS app_overlap_geom,
-              po.geom AS pre_overlap_geom,
-              no.geom AS no_tier_geom
-       FROM rpc_growth_union g
-       LEFT JOIN rpc_app_overlap ao ON ao.rpc = g.rpc
-       LEFT JOIN rpc_pre_overlap po ON po.rpc = g.rpc
-       LEFT JOIN rpc_no_tier no ON no.rpc = g.rpc""",
-]
+def inputs(con):
+    def records(query, fields):
+        return [dict(zip(fields, row)) for row in con.execute(query).fetchall()]
+    areas = records('SELECT feature_id, municipality, category FROM interim_areas ORDER BY feature_id',
+                    ['feature_id', 'municipality', 'category'])
+    towns = records("SELECT municipality, geoid FROM current_features WHERE kind = 'municipality_boundary' ORDER BY feature_id",
+                    ['municipality', 'geoid'])
+    return areas, towns
+
+
+def provenance(con):
+    run = con.execute('SELECT run_id FROM latest_ingest_run').fetchone()
+    if not run:
+        raise ValueError('No successful capture. Restore a completed snapshot.')
+    areas, towns = inputs(con)
+    metadata = {
+        'schema_version': 1, 'snapshot_id': run[0],
+        'membership_version': MEMBERSHIP_VERSION, 'membership_basis': MEMBERSHIP_BASIS,
+        'rules_sha256': hashlib.sha256(json.dumps({
+            'version': MEMBERSHIP_VERSION, 'aliases': ALIASES,
+            'rutland_features': sorted(RUTLAND_FEATURES),
+        }, sort_keys=True).encode()).hexdigest(),
+        'inputs_sha256': hashlib.sha256(json.dumps([areas, towns], sort_keys=True).encode()).hexdigest(),
+    }
+    return metadata, areas, towns
+
+
+def prepare(db_path=DB_PATH, output=MEMBERSHIP_PATH):
+    if not Path(db_path).is_file():
+        raise SystemExit(f'Database not found: {db_path}. Restore a saved snapshot with make transform SNAPSHOT=…')
+    with duckdb.connect(str(db_path), read_only=True) as con:
+        con.execute('BEGIN TRANSACTION')
+        metadata, areas, towns = provenance(con)
+        document = {**metadata, 'memberships': derive_memberships(areas, towns)}
+        con.execute('COMMIT')
+    # Avoid invalidating downstream timestamps when the prepared data is unchanged.
+    output = Path(output)
+    if not output.exists() or json.loads(output.read_text()) != document:
+        write_json(output, document)
+    print(f'Prepared {len(document["memberships"])} municipality relationships → {output}')
+    return document
+
+
+def load_prepared(con, path=MEMBERSHIP_PATH):
+    path = Path(path)
+    if not path.is_file():
+        raise ValueError('Missing municipality relationships; run make prepare.')
+    document = json.loads(path.read_text())
+    expected, _, _ = provenance(con)
+    if any(document.get(key) != value for key, value in expected.items()):
+        raise ValueError('Stale municipality relationships; run make prepare.')
+    return document['memberships']
 
 
 def main():
-    config.DATA_DIR.mkdir(parents=True, exist_ok=True)
-
-    if config.DB_PATH.exists():
-        config.DB_PATH.unlink()
-
-    duck = duckdb.connect(str(config.DB_PATH))
-    duck.execute("LOAD spatial;")
-
-    for ddl in CREATE_TABLES_SQL:
-        duck.execute(ddl)
-
-    # ── Ingest GeoJSON sources ──
-    print("── Ingesting GeoJSON sources ──")
-    for source_key, source_cfg in config.SOURCES.items():
-        path = config.IN_DIR / f"{source_key}.geojson"
-        if not path.exists():
-            print(f"SKIP {source_key} — no file at {path}")
-            continue
-
-        domain = source_cfg["domain"]
-        field_map = config.FIELD_MAPS[source_key]
-        features = load_geojson(path)
-
-        if domain == "flu":
-            rows = build_flu_rows(source_key, features, field_map)
-            n = bulk_load(duck, rows, "flu_areas", config.FLU_COLUMNS)
-            print(f"  {source_key}: {n} flu_areas rows")
-        elif domain == "tier":
-            rows = build_tier_rows(source_key, features, field_map)
-            n = bulk_load(duck, rows, "tier_areas", config.TIER_COLUMNS)
-            print(f"  {source_key}: {n} tier_areas rows")
-        elif domain == "boundary":
-            rows = build_boundary_rows(source_key, features, field_map)
-            n = bulk_load(duck, rows, "boundary_areas", config.BOUNDARY_COLUMNS)
-            print(f"  {source_key}: {n} boundary_areas rows")
-        elif domain == "water":
-            rows = build_water_rows(source_key, features, field_map)
-            n = bulk_load(duck, rows, "water_areas", config.WATER_COLUMNS)
-            print(f"  {source_key}: {n} water_areas rows")
-        elif domain == "population":
-            rows = build_population_rows(source_key, features, field_map)
-            n = bulk_load(duck, rows, "population", config.POPULATION_COLUMNS)
-            print(f"  {source_key}: {n} population rows")
-
-    flu_count = duck.execute("SELECT COUNT(*) FROM flu_areas").fetchone()[0]
-    tier_count = duck.execute("SELECT COUNT(*) FROM tier_areas").fetchone()[0]
-    repair_count = duck.execute(
-        "SELECT COUNT(*) FROM tier_areas WHERE source_layer = 'tier_consolidated' AND rpc = 'WR' AND version IS NULL"
-    ).fetchone()[0]
-    boundary_count = duck.execute("SELECT COUNT(*) FROM boundary_areas").fetchone()[0]
-    water_count = duck.execute("SELECT COUNT(*) FROM water_areas").fetchone()[0]
-    print(f"\nSummary: {flu_count} flu areas, {tier_count} tier areas ({repair_count} WR repaired)")
-    print(f"         {boundary_count} boundary areas, {water_count} water areas")
-
-    # ── Validate geometries ──
-    print("\n── Validating geometries ──")
-    for table in ["flu_areas", "tier_areas"]:
-        invalid = duck.execute(f"SELECT COUNT(*) FROM {table} WHERE NOT ST_IsValid(geom)").fetchone()[0]
-        if invalid > 0:
-            duck.execute(f"UPDATE {table} SET geom = ST_Buffer(geom, 0) WHERE NOT ST_IsValid(geom)")
-            remaining = duck.execute(f"SELECT COUNT(*) FROM {table} WHERE NOT ST_IsValid(geom)").fetchone()[0]
-            if remaining > 0:
-                duck.execute(f"UPDATE {table} SET geom = ST_CollectionExtract(ST_MakeValid(geom), 3) WHERE NOT ST_IsValid(geom)")
-            print(f"  Fixed {invalid} invalid geometries in {table}")
-
-    # ── Create spatial indexes ──
-    print("\n── Creating spatial indexes ──")
-    duck.execute("CREATE INDEX idx_flu_geom ON flu_areas (geom)")
-    duck.execute("CREATE INDEX idx_tier_geom ON tier_areas (geom)")
-    duck.execute("CREATE INDEX idx_boundary_geom ON boundary_areas (geom)")
-    print("  Created R-tree indexes on all geometry columns")
-
-    # ── Materialize aggregated layers ──
-    print("\n── Materializing aggregated layers ──")
-    for sql in MATERIALIZATION_SQL:
-        table_name = sql.split("CREATE TABLE ")[1].split(" AS")[0]
-        duck.execute(sql)
-        count = duck.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()[0]
-        print(f"  {table_name}: {count} rows")
-
-    # ── Pre-intersect analysis results ──
-    print("\n── Pre-intersecting analysis results ──")
-    for sql in PRE_INTERSECT_SQL:
-        table_name = sql.split("CREATE TABLE ")[1].split(" AS")[0]
-        duck.execute(sql)
-        count = duck.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()[0]
-        print(f"  {table_name}: {count} rows")
-
-    duck.close()
-
-    db_size = config.DB_PATH.stat().st_size / (1024 * 1024)
-    print(f"\nWrote {config.DB_PATH} ({db_size:.0f} MB)")
+    parser = argparse.ArgumentParser(description=__doc__)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument('--snapshot', type=Path, help='Load this completed raw snapshot')
+    source.add_argument('--prepare', action='store_true', help='Prepare relationships from the existing read-only database')
+    parser.add_argument('--db', type=Path, default=DB_PATH)
+    parser.add_argument('--memberships', type=Path, default=MEMBERSHIP_PATH)
+    args = parser.parse_args()
+    if args.snapshot:
+        load_snapshot(args.snapshot, args.db)
+    prepare(args.db, args.memberships)
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dashboard browser checks</title>
+<style>
+body {font: 16px system-ui; max-width: 60rem; margin: 3rem auto; padding: 0 1rem;}
+.pass {color: #17603b} .fail {color: #a12020} li {margin: 1rem 0}
+</style>
+<h1>Dashboard browser checks</h1>
+<p>Open this file in a browser after changing animation or eligibility display logic.
+These checks load the same scripts as the dashboard. No server or extra runtime is needed.</p>
+<p id="summary" role="status">Running…</p>
+<ol id="results"></ol>
+<script src="../web/story-animation.js"></script>
+<script src="../web/eligibility-display.js"></script>
+<script>
+'use strict';
+let passed = 0, failed = 0;
+function test(name, fn) {
+  const row = document.createElement('li');
+  try {fn(); passed++; row.className = 'pass'; row.textContent = 'PASS: ' + name;}
+  catch (error) {failed++; row.className = 'fail'; row.textContent = 'FAIL: ' + name + ' — ' + error.message;}
+  document.getElementById('results').append(row);
+}
+function canonical(value) {
+  if (Array.isArray(value)) return value.map(canonical);
+  if (value && typeof value === 'object') return Object.fromEntries(
+    Object.keys(value).sort().map(key => [key, canonical(value[key])]));
+  return value;
+}
+const assert = {
+  equal(actual, expected) {
+    if (!Object.is(actual, expected)) throw new Error(`Expected ${expected}; received ${actual}`);
+  },
+  deepEqual(actual, expected) {
+    this.equal(JSON.stringify(canonical(actual)), JSON.stringify(canonical(expected)));
+  },
+};
+const display = EligibilityDisplay;
+const {compile, player, timing} = window.MapStoryAnimation;
+
+test('infrastructure uses three-valued OR without changing publisher status', () => {
+  for (const a of [true, false, null]) for (const b of [true, false, null]) for (const c of [true, false, null]) {
+    const area = {drinking_water:a, sewer_wastewater:b, adequate_soils:c, likely_eligible:false};
+    const expected = [a,b,c].includes(true) ? true : [a,b,c].includes(null) ? null : false;
+    assert.equal(display.infrastructure(area), expected);
+    assert.equal(area.likely_eligible, false);
+  }
+});
+test('only the development category omits separate zoning', () => {
+  assert.equal(display.zoningApplies({category:'town_growth_development'}), false);
+  for (const category of ['downtown_district','village_center_buffer',undefined]) {
+    assert.equal(display.zoningApplies({category}), true);
+  }
+});
+
+const initial = [{style: {opacity: 0, fillColor: '#000000'}}];
+const timeline = () => compile(initial, [
+  [() => ({opacity: 1}), () => ({fillColor: '#ffffff'}), () => ({opacity: 0.5})],
+  [() => ({opacity: 0}), () => ({fillColor: '#000000'}), () => ({opacity: 1})],
+]);
+function harness(reduced = false, duration = timing.duration) {
+  let time = 0, callback, id = 0, current;
+  const controller = player(timeline(), (items, position) => {current = {items, position};}, {
+    now: () => time, reduced: () => reduced, config: {...timing, duration},
+    requestFrame: fn => {callback = fn; return ++id;},
+    cancelFrame: () => {callback = null;},
+  });
+  return {go: controller.go, get current() {return current;},
+    get pending() {return !!callback;},
+    tick(ms) {time += ms; const fn = callback; callback = null; if (fn) fn(time);},
+  };
+}
+test('three equal phases and half-length gaps produce exact endpoint and hold states', () => {
+  const t = timeline();
+  assert.deepEqual(t.stops, [0, 4, 8]);
+  assert.equal(t.sample(0.5)[0].style.opacity, 0.5);
+  assert.deepEqual(t.sample(1)[0].style, t.sample(1.4)[0].style);
+  assert.equal(t.sample(2)[0].style.fillColor, '#808080');
+  assert.deepEqual(t.sample(2.5)[0].style, t.sample(2.9)[0].style);
+  assert.equal(t.sample(4)[0].style.opacity, 0.5);
+});
+test('reverse retraces phases and gaps at twice the forward speed', () => {
+  const h = harness(); h.go(1); h.tick(3600);
+  assert.equal(h.current.position, 4); assert.equal(h.pending, false);
+  h.go(0); h.tick(225);
+  assert.equal(h.current.position, 3.5);
+  assert.deepEqual(h.current.items, timeline().sample(3.5));
+  h.tick(1575); assert.equal(h.current.position, 0); assert.equal(h.pending, false);
+});
+test('rapid retargeting preserves the playhead and never applies a stale destination', () => {
+  const h = harness(); h.go(1); h.tick(1800);
+  const before = h.current; h.go(0); assert.deepEqual(h.current, before);
+  h.tick(225); assert.equal(h.current.position, 1.5);
+  h.go(2); h.tick(450); assert.equal(h.current.position, 2);
+  h.go(0); h.tick(900); assert.equal(h.current.position, 0);
+  h.tick(10000); assert.equal(h.current.position, 0); assert.equal(h.pending, false);
+});
+test('changing duration scales phases, gaps and reverse playback together', () => {
+  const h = harness(false, 1800); h.go(2); h.tick(14400);
+  assert.equal(h.current.position, 8);
+  h.go(0); h.tick(7200); assert.equal(h.current.position, 0);
+});
+test('reduced motion goes directly to the requested chapter', () => {
+  const h = harness(true); h.go(2); assert.equal(h.current.position, 8);
+  h.go(0); assert.equal(h.current.position, 0); assert.equal(h.pending, false);
+});
+
+const summary = document.getElementById('summary');
+summary.textContent = `${passed} passed, ${failed} failed`;
+summary.className = failed ? 'fail' : 'pass';
+</script>
+</html>

@@ -1,39 +1,58 @@
 UV = uv run python3
+PORT ?= 8000
+HOST ?= 127.0.0.1
+WORKERS ?= 4
+SNAPSHOT ?=
 
 .DEFAULT_GOAL := build
-.PHONY: all build export ingest extract transform analyze status clean rebuild serve legacy legacy-status test
+.PHONY: all build export prepare ingest extract transform analyze page status clean rebuild serve test help setup-spatial
 
 all: build
 
-# Website work is entirely local: these targets never download or ingest data.
+# Ordinary builds only read the saved database; preparation writes a sidecar.
 build: export
-	$(UV) build_dashboard.py
+	$(MAKE) page
 
-export:
-	$(UV) export_data.py
+export: prepare
+	$(UV) analyze.py --export
 
-ingest: extract
+prepare:
+	$(UV) transform.py --prepare
 
-# The original overlay analysis reads the original in/*.geojson cache.
-legacy: transform analyze legacy-status
-
-legacy-status:
-	$(UV) legacy_status.py
-
-test:
-	$(UV) -m unittest discover -v
-
-extract:
-	$(UV) extract.py
-
-transform:
-	$(UV) transform.py
-
-analyze:
+analyze: prepare
 	$(UV) analyze.py
 
+page: out/dashboard/index.html
+
+PAGE_INPUTS = analyze.py config.py $(wildcard web/*.html web/*.css web/*.js web/assets/* web/vendor/*)
+out/dashboard/index.html: $(PAGE_INPUTS) out/dashboard/data/manifest.json out/dashboard/data/interim-areas.json out/dashboard/data/map.json
+	$(UV) analyze.py --page
+
+# Missing exports are an error, never an implicit fetch or database load.
+out/dashboard/data/%.json:
+	@echo 'Missing exports. Run make export or make build.' >&2
+	@exit 1
+
+# Explicit network operations, never prerequisites of local build targets.
+extract:
+	$(UV) extract.py --workers $(WORKERS)
+
+ingest:
+	$(UV) -c "from extract import capture; from transform import load_snapshot, prepare; load_snapshot(capture(workers=$(WORKERS))); prepare()"
+
+# Pass a completed capture explicitly; never guess which snapshot to restore.
+transform:
+	@test -n "$(SNAPSHOT)" || { echo 'Usage: make transform SNAPSHOT=in/snapshots/<capture>' >&2; exit 1; }
+	$(UV) transform.py --snapshot "$(SNAPSHOT)"
+
 status:
-	$(UV) status.py
+	$(UV) analyze.py --status
+
+test:
+	$(UV) -m unittest discover -s tests -v
+
+setup-spatial:
+	$(UV) -c "import duckdb; duckdb.connect().execute('INSTALL spatial')"
 
 clean:
 	rm -rf out/dashboard
@@ -43,4 +62,12 @@ rebuild:
 	$(MAKE) build
 
 serve: build
-	python3 -m http.server 8000 --bind 127.0.0.1 -d out/dashboard
+	$(UV) -m http.server $(PORT) --bind $(HOST) -d out/dashboard
+
+help:
+	@echo 'Local: make/build, export, prepare, analyze, page, status, test'
+	@echo 'Preview: make serve [PORT=8001] [HOST=127.0.0.1]'
+	@echo 'Restore: make transform SNAPSHOT=in/snapshots/<capture> (no downloads)'
+	@echo 'Network: make extract (capture only), ingest (capture + load), setup-spatial'
+	@echo 'Cleanup: make clean/rebuild (dashboard output only; preserves research data)'
+	@echo 'Tests: make test (Python); open tests/browser.html for browser checks'

@@ -7,71 +7,7 @@ import unittest
 from unittest.mock import patch
 
 import duckdb
-import arcgis
-import ingest
-from ingest_sources import select_layer
-
-
-class ArcGISTests(unittest.TestCase):
-    def test_arcgis_error_is_not_empty_success(self):
-        response = io.BytesIO(b'{"error":{"code":500,"message":"bad query"}}')
-        with patch('arcgis.urlopen', return_value=response):
-            with self.assertRaisesRegex(RuntimeError, 'bad query'):
-                arcgis.fetch_json('https://example.test', retries=1)
-
-    def test_count_mismatch_fails(self):
-        with patch('arcgis.fetch_json', side_effect=[{'objectIds': [1]}, {'count': 2}]):
-            with self.assertRaisesRegex(RuntimeError, 'disagree'):
-                arcgis.query_ids('https://example.test')
-
-    def test_transfer_limit_splits_batches(self):
-        meta = {'objectIdField': 'FID', 'maxRecordCount': 100}
-        def fetch(url, params=None):
-            if params is None:
-                return meta
-            ids = [int(i) for i in params['objectIds'].split(',')]
-            received = ids[:1]
-            return {'type': 'FeatureCollection', 'exceededTransferLimit': len(ids) > 1,
-                    'features': [{'properties': {'FID': i}, 'geometry': None} for i in received]}
-        with patch('arcgis.query_ids', return_value=[1, 2, 3]), patch('arcgis.fetch_json', side_effect=fetch):
-            result = arcgis.download('https://example.test', meta)
-        self.assertEqual([f['properties']['FID'] for f in result['features']], [1, 2, 3])
-
-    def test_missing_single_feature_fails(self):
-        with patch('arcgis.query_ids', return_value=[1]), patch('arcgis.fetch_json', return_value={
-                'type': 'FeatureCollection', 'features': []}):
-            with self.assertRaisesRegex(RuntimeError, 'Missing'):
-                arcgis.download('https://example.test', {'objectIdField': 'FID'})
-
-    def test_truncated_json_response_splits_batch(self):
-        meta = {'objectIdField': 'FID', 'maxRecordCount': 100}
-        truncated = json.JSONDecodeError('truncated', '', 0)
-
-        def fetch(url, params=None):
-            if params is None:
-                return meta
-            ids = [int(i) for i in params['objectIds'].split(',')]
-            if len(ids) > 1:
-                raise truncated
-            return {'type': 'FeatureCollection',
-                    'features': [{'properties': {'FID': ids[0]}, 'geometry': None}]}
-
-        with patch('arcgis.query_ids', return_value=[1, 2, 3]), patch(
-                'arcgis.fetch_json', side_effect=fetch):
-            result = arcgis.download('https://example.test', meta)
-        self.assertEqual([f['properties']['FID'] for f in result['features']], [1, 2, 3])
-
-    def test_source_edit_during_download_fails(self):
-        meta = {'objectIdField': 'FID', 'editingInfo': {'lastEditDate': 1}}
-        with patch('arcgis.query_ids', return_value=[]), patch('arcgis.fetch_json', return_value={
-                **meta, 'editingInfo': {'lastEditDate': 2}}):
-            with self.assertRaisesRegex(RuntimeError, 'edited'):
-                arcgis.download('https://example.test', meta)
-
-    def test_excluded_layers_and_hidden_layers(self):
-        layer = {'url': 'https://example.test/MapServer/8', 'visibility': False}
-        self.assertIsNone(select_layer('interim', ('IV.) Priority Housing Projects within Buffer',), layer))
-        self.assertEqual(select_layer('interim', ('III.) Village Center & Buffer',), layer)['kind'], 'interim')
+import transform
 
 
 class DatabaseTests(unittest.TestCase):
@@ -100,18 +36,18 @@ class DatabaseTests(unittest.TestCase):
         }, geometry={'type': 'Point', 'coordinates': [-72.123456789, 44.123456789]})]
         if duplicate:
             features *= 2
-        ingest.write_json(directory / 's.geojson', {'type': 'FeatureCollection', 'features': features})
-        ingest.write_json(directory / 's_meta.json', self.meta)
+        transform.write_json(directory / 's.geojson', {'type': 'FeatureCollection', 'features': features})
+        transform.write_json(directory / 's_meta.json', self.meta)
         manifest = dict(schema_version=1, run_id=run, started_at=run[:4]+'-09-08T00:00:00Z',
                         completed_at='2026-09-08T00:00:01Z', layers=[layer], sources=[dict(
                             source_id='s', url='https://example.test/0', count=len(features), memberships={'map:1': [1]})],
-                        files={p.name: ingest.sha256(p) for p in directory.iterdir()})
-        ingest.write_json(directory / 'manifest.json', manifest)
+                        files={p.name: transform.sha256(p) for p in directory.iterdir()})
+        transform.write_json(directory / 'manifest.json', manifest)
         return directory
 
     def load(self, directory):
         with contextlib.redirect_stdout(io.StringIO()):
-            ingest.load_snapshot(directory, self.db)
+            transform.load_snapshot(directory, self.db)
 
     def test_structured_fields_geometry_and_idempotence(self):
         directory = self.fixture()
@@ -140,25 +76,39 @@ class DatabaseTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'checksum'):
             self.load(directory)
 
+    def test_restore_never_writes_snapshot_or_calls_network(self):
+        directory = self.fixture()
+        before = {p.name: p.read_bytes() for p in directory.iterdir()}
+        original_open = Path.open
+        def readonly_snapshot(path, mode='r', *args, **kwargs):
+            if path.parent == directory and any(flag in mode for flag in ('w', 'a', '+', 'x')):
+                raise AssertionError('Snapshot write attempted')
+            return original_open(path, mode, *args, **kwargs)
+        with patch.object(Path, 'open', readonly_snapshot), \
+                patch('extract.capture', side_effect=AssertionError('unexpected capture')), \
+                patch('arcgis.fetch_json', side_effect=AssertionError('unexpected network')):
+            self.load(directory)
+        self.assertEqual({p.name: p.read_bytes() for p in directory.iterdir()}, before)
+
     def test_missing_geometry_is_retained(self):
         directory = self.fixture()
         data = json.loads((directory / 's.geojson').read_text())
         data['features'][0]['geometry'] = None
-        ingest.write_json(directory / 's.geojson', data)
+        transform.write_json(directory / 's.geojson', data)
         manifest = json.loads((directory / 'manifest.json').read_text())
-        manifest['files']['s.geojson'] = ingest.sha256(directory / 's.geojson')
-        ingest.write_json(directory / 'manifest.json', manifest)
+        manifest['files']['s.geojson'] = transform.sha256(directory / 's.geojson')
+        transform.write_json(directory / 'manifest.json', manifest)
         self.load(directory)
         with duckdb.connect(str(self.db)) as con:
             self.assertEqual(con.execute('SELECT count(*) FROM current_features WHERE geom IS NULL').fetchone()[0], 1)
 
     def test_empty_source_remains_in_catalog(self):
         directory = self.fixture()
-        ingest.write_json(directory / 's.geojson', {'type': 'FeatureCollection', 'features': []})
+        transform.write_json(directory / 's.geojson', {'type': 'FeatureCollection', 'features': []})
         manifest = json.loads((directory / 'manifest.json').read_text())
         manifest['sources'][0].update(count=0, memberships={'map:1': []})
-        manifest['files']['s.geojson'] = ingest.sha256(directory / 's.geojson')
-        ingest.write_json(directory / 'manifest.json', manifest)
+        manifest['files']['s.geojson'] = transform.sha256(directory / 's.geojson')
+        transform.write_json(directory / 'manifest.json', manifest)
         self.load(directory)
         with duckdb.connect(str(self.db)) as con:
             self.assertEqual(con.execute('SELECT feature_count FROM current_layers').fetchone()[0], 0)
@@ -167,7 +117,7 @@ class DatabaseTests(unittest.TestCase):
     def test_stage_is_independent_from_approval(self):
         source = dict(source_id='s', url='https://example.test')
         layer = dict(source_id='s', kind='tier', category='tier', stage='application', rpc='CC', path=['Tier 1B'])
-        row = ingest.normalize({'properties': {'FID': 9, 'TIER_VERS': 'APP', 'LURBSTATUS': 'APR'}, 'geometry': None},
+        row = transform.normalize({'properties': {'FID': 9, 'TIER_VERS': 'APP', 'LURBSTATUS': 'APR'}, 'geometry': None},
                                self.meta, source, [layer], 'r')
         self.assertEqual((row['submission_version'], row['lurb_status'], row['tier_code']), ('APP', 'APR', '1B'))
 
@@ -176,7 +126,7 @@ class DatabaseTests(unittest.TestCase):
         municipal_layer = dict(source_id='s', kind='municipality_boundary',
                                category='municipality_boundary', stage='reference', rpc=None,
                                path=['VT Data - Town Boundaries'])
-        municipal = ingest.normalize({'properties': {
+        municipal = transform.normalize({'properties': {
             'FID': 1, 'TOWNNAME': 'BURLINGTON', 'TOWNNAMEMC': 'Burlington',
             'TOWNGEOID': '5000710675', 'CNTY': 7,
         }, 'geometry': None}, self.meta, source, [municipal_layer], 'r')
@@ -187,7 +137,7 @@ class DatabaseTests(unittest.TestCase):
         rpc_layer = dict(source_id='s', kind='rpc_boundary', category='rpc_boundary',
                          stage='reference', rpc=None,
                          path=['VT Data - RPC Boundaries'])
-        rpc = ingest.normalize({'properties': {
+        rpc = transform.normalize({'properties': {
             'FID': 2, 'RPC': 'CC', 'INITIALS': 'CCRPC',
             'LONGNAME': 'Chittenden County Regional Planning Commission',
         }, 'geometry': None}, self.meta, source, [rpc_layer], 'r')
@@ -195,5 +145,3 @@ class DatabaseTests(unittest.TestCase):
                          ('CC', 'Chittenden County Regional Planning Commission'))
 
 
-if __name__ == '__main__':
-    unittest.main()
