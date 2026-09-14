@@ -1,7 +1,26 @@
-(() => {
+(async () => {
   'use strict';
-  const data = JSON.parse(document.getElementById('interim-data').textContent);
-  const mapData = JSON.parse(document.getElementById('map-data').textContent);
+  const loadStatus = document.getElementById('data-status');
+  let data, mapData;
+  try {
+    [data, mapData] = await Promise.all(['interim-areas.json', 'map.json'].map(async name => {
+      const response = await fetch(`./data/${name}`);
+      if (!response.ok) throw new Error(`Could not load ${name}: HTTP ${response.status}`);
+      return response.json();
+    }));
+    if (data.schema_version !== 1 || mapData.schema_version !== 2 ||
+        ['snapshot_id', 'captured_at', 'exported_at'].some(key => !data[key] || data[key] !== mapData[key])) {
+      throw new Error('The table and map exports do not match.');
+    }
+  } catch (error) {
+    loadStatus.setAttribute('role', 'alert');
+    loadStatus.textContent = location.protocol === 'file:'
+      ? 'Preview this dashboard with make serve, or open its published website URL.'
+      : 'Unable to load dashboard data. Please reload the page. If this persists, check that the complete data folder was uploaded alongside index.html.';
+    console.error(error);
+    return;
+  }
+  loadStatus.hidden = true;
   const table = document.getElementById('areas-table');
   const search = document.getElementById('search');
   const eligibility = document.getElementById('eligibility');

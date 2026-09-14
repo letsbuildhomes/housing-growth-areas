@@ -75,7 +75,7 @@ class DashboardTests(unittest.TestCase):
             self.assertFalse(db.exists())
             self.assertFalse((Path(temp) / 'output').exists())
 
-    def test_standalone_payload_cannot_inject_html(self):
+    def test_static_page_loads_external_data_without_embedding_payload(self):
         with tempfile.TemporaryDirectory() as temp:
             output = Path(temp)
             (output / 'data').mkdir()
@@ -90,8 +90,10 @@ class DashboardTests(unittest.TestCase):
             }))
             build(output)
             html = (output / 'index.html').read_text()
-            embedded = re.search(r'<script type="application/json" id="interim-data">(.*?)</script>', html, re.S)[1]
-            self.assertEqual(json.loads(embedded), payload)
+            self.assertNotIn('id="interim-data"', html)
+            self.assertNotIn('id="map-data"', html)
+            self.assertIn('fetch(`./data/${name}`)', html)
+            self.assertEqual(json.loads((output / 'data' / 'interim-areas.json').read_text()), payload)
             self.assertNotIn('<img src=x', html)
             self.assertNotIn('{{DATA}}', html)
             self.assertNotRegex(html, r'<script[^>]+src=|<link[^>]+href=')

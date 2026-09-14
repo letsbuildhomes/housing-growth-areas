@@ -486,9 +486,11 @@ areas, towns, and RPCs, plus the prepared relationships and membership provenanc
 The map and table retain their existing public schemas.
 
 The page builder checks matching snapshot/capture/export identities before
-embedding the table, map, CSS, JavaScript, logo, and vendored Leaflet. JSON is
-escaped for safe HTML embedding, and finished HTML replaces the previous page
-only after validation succeeds. Street tiles remain an optional online resource.
+embedding CSS, JavaScript, logo, and vendored Leaflet. The page fetches table and
+map JSON from the adjacent `data/` directory and validates their schema and matching
+capture/export identities before rendering. Finished HTML replaces the previous
+page only after build validation succeeds. Serve the complete dashboard directory
+over HTTP; street tiles remain an optional online resource.
 
 Display order is municipality A–Z, then downtown districts, village centers/buffers,
 and town/growth/development areas, with names A–Z within each category. Filters

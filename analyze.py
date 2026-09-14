@@ -173,7 +173,7 @@ def export_all(db_path=DB_PATH, output=EXPORT_DIR, memberships_path=MEMBERSHIP_P
 # Publish one complete export generation
 
 def json_text(value):
-    return json.dumps(value, ensure_ascii=False, allow_nan=False, indent=2) + '\n'
+    return json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(',', ':')) + '\n'
 
 
 def publish_json_directory(output, documents):
@@ -200,7 +200,7 @@ def publish_json_directory(output, documents):
             raise
 
 
-# Standalone page assembly
+# Static page assembly
 
 def build(output=DASHBOARD_DIR):
     output = Path(output)
@@ -214,9 +214,6 @@ def build(output=DASHBOARD_DIR):
         raise ValueError('Unsupported interim export schema')
     if map_dataset['schema_version'] != 2:
         raise ValueError('Unsupported map export schema')
-    # Embedded JSON lets the page work directly via file:// as well as a static
-    # server. Escape HTML delimiters so source strings cannot close the script.
-    payload = json.dumps(dataset, ensure_ascii=False).replace('&', '\\u0026').replace('<', '\\u003c').replace('>', '\\u003e')
     substitutions = {
         '{{LOGO}}': 'data:image/svg+xml;base64,' + base64.b64encode((ROOT / 'web' / 'assets' / 'lbh-logo.svg').read_bytes()).decode('ascii'),
         '{{STYLES}}': (ROOT / 'web' / 'dashboard.css').read_text(),
@@ -224,8 +221,6 @@ def build(output=DASHBOARD_DIR):
         '{{LEAFLET_JS}}': (ROOT / 'web' / 'vendor' / 'leaflet.js').read_text(),
         '{{SCRIPT}}': '\n'.join((ROOT / 'web' / name).read_text() for name in
                                ('story-animation.js', 'eligibility-display.js', 'dashboard.js')),
-        '{{DATA}}': payload,
-        '{{MAP_DATA}}': json.dumps(map_dataset, ensure_ascii=False).replace('&', '\\u0026').replace('<', '\\u003c').replace('>', '\\u003e'),
     }
     html = (ROOT / 'web' / 'index.html').read_text()
     for marker, value in substitutions.items():
@@ -236,7 +231,7 @@ def build(output=DASHBOARD_DIR):
     temp = target.with_suffix('.html.tmp')
     temp.write_text(html)
     temp.replace(target)
-    print(f'Built {target} (embedded data and assets; online street basemap)')
+    print(f'Built {target} (data/ JSON required; embedded assets; online street basemap)')
 
 
 # Saved capture status

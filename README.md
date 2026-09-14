@@ -35,8 +35,15 @@ Missing data produces an error; it never triggers acquisition or sample data.
 `WORKERS=1` through `8` controls capture concurrency (default 4). `HOST` controls
 preview binding (default `127.0.0.1`). Use `make help` or a script's `--help` for
 options. Reuse an existing preview server; after source edits, rebuild and reload.
-Open `out/dashboard/index.html` directly to share/view the embedded dashboard.
-Polygons and the table work offline; the optional OpenStreetMap tiles need internet.
+Run `make build`, then upload the contents of `out/dashboard/` to your website
+directory, keeping `index.html` and its `data/` folder together. Paths are relative,
+so publishing in a subdirectory works. CSS, JavaScript, and the logo remain embedded;
+table and map JSON load from `data/`. No backend is required.
+Builds write compact JSON without indentation; enable gzip or Brotli on the web
+server to further reduce download sizes.
+Preview with `make serve`; opening the HTML directly via `file://` cannot load JSON.
+Polygons and the table work on a local server without internet; optional
+OpenStreetMap tiles need internet.
 
 ## Project layout
 
