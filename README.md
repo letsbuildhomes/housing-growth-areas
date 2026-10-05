@@ -26,7 +26,7 @@ Missing data produces an error; it never triggers acquisition or sample data.
 | `make transform SNAPSHOT=in/snapshots/<capture>` | Load that completed snapshot offline and prepare relationships. |
 | `make ingest` | **Network:** capture, load, and prepare in sequence. |
 | `make page` | Rebuild HTML only when its source files or exports changed. |
-| `make export` / `make prepare` | Regenerate JSON exports / prepared municipality relationships. |
+| `make export` / `make prepare` | Regenerate JSON exports / derived membership and geometry sidecars. |
 | `make status` | Show saved capture coverage and quality flags. |
 | `make serve PORT=8001` | Build and preview on a chosen port. |
 | `make deploy` | Build from saved data and publish the dashboard to vibes. |
@@ -42,7 +42,7 @@ so publishing in a subdirectory works. CSS, JavaScript, and the logo remain embe
 table and map JSON load from `data/`. No backend is required.
 Builds write compact JSON without indentation; enable gzip or Brotli on the web
 server to further reduce download sizes.
-Tier 1B display polygons use guarded 0.5 m simplification during export. Detailed
+Tier 1B and housing growth display polygons use guarded 0.5 m simplification during export. Detailed
 prepared geometry remains unchanged for analysis; export metadata records the
 rules and automatic fallbacks.
 Preview with `make serve`; opening the HTML directly via `file://` cannot load JSON.
@@ -74,7 +74,7 @@ source refresh and snapshot loading are always explicit.
 
 ```text
 extract.py   → in/snapshots/<capture>/
-transform.py → data/act181_ingest.duckdb + municipality-memberships.json
+transform.py → data/act181_ingest.duckdb + derived JSON sidecars
 analyze.py   → out/dashboard/data/*.json + index.html
 ```
 
@@ -90,7 +90,7 @@ analyze.py   → out/dashboard/data/*.json + index.html
 | [Research reference](docs/research.md) | Source scope, schemas, dated findings, crosswalk decisions, export contract. |
 
 `transform.py --prepare` reads the database without modifying it and regenerates
-the membership and municipal Tier 1B sidecars. `analyze.py` accepts `--export`, `--page`, or `--status`;
+the membership, municipal Tier 1B, and housing growth sidecars. `analyze.py` accepts `--export`, `--page`, or `--status`;
 without a mode it exports and builds. Scripts accept alternate paths through
 `--db`, `--memberships`, and/or `--output` where applicable.
 
@@ -124,6 +124,10 @@ live in `analyze.py`; after changing them, run `make build`. Keep geometry expor
 separate from table data and bump public schema versions for incompatible changes.
 See the [export contract](docs/research.md#dashboard-export-contract).
 
+Prioritize a clear statewide pattern when developing the map. Minor visual
+discrepancies are acceptable; add precision handling only when a discrepancy
+changes the meaningful interpretation.
+
 Run `make test` for Python logic changes. Open [tests/browser.html](tests/browser.html)
 in a browser for animation and eligibility-display checks: it loads the real
 browser scripts, reports pass/fail, and needs no extra runtime. These checks are
@@ -132,17 +136,47 @@ map navigation, hover values, and narrow layouts when changing their behavior.
 
 Stories are registered in `web/stories.js`, whose `active` ID chooses the published
 journey. `web/story-act181.js` preserves the original five chapters with
-`enabled: false`; `web/story-overview.js` is the active three-chapter starting point
-for the next research question. Disabled stories are never mounted or reachable
+`enabled: false`; `web/story-overview.js` is the active four-chapter Housing Growth
+Area comparison. It outlines each Housing Growth Area (a prepared block) over its four
+future land use categories, colors municipalities with and without them, shows their
+intersection and difference with mapped Tier 1B, then summarizes municipal Tier 1B
+coverage. Hovers report one "Submission stage" (each region's selected map stage);
+coverage colors do not imply final approval.
+Overlap polygons are green and uncovered polygons are red; yellow identifies
+municipalities with mixed coverage. Tier 1B has no separate outline layer; green and
+red pieces share one hover that gives the piece's acreage within its Housing Growth
+Area. Split pieces under one acre are hidden in the browser as display slivers; a
+whole area under one acre still shows. Boundary slivers narrower than 4 m join their
+largest neighbor during preparation. Shared split boundaries retain detailed
+geometry during export so complementary pieces do not develop display seams.
+Excluded boundary fragments remain in saved data and audit provenance and are
+omitted from the map. Block counts and coverage use analytical geometry only.
+“Cannot assess” appears in the legend only when the loaded data contains an
+unknown classification; “No Housing Growth Areas” remains a separate category.
+Disabled stories are never mounted or reachable
 through a URL. To restore the original, set its `enabled` flag to `true`, change
 `active` to `act181`, then run `make page`. Only the active story is visible.
 
-Each story's `create` function receives saved map/Tier 1B data and the shared
-palette, and returns `steps` (copy, municipality count predicates, polygon keys)
-and `groups` (one nonempty transition group per chapter interval). For example,
+Each story's `create` function receives saved map/Tier 1B/housing growth data and the shared
+palette, and returns `steps` (copy, count predicates, polygon keys) and `groups`
+(one nonempty transition group per chapter interval). Counts select municipalities
+unless a step sets `statsOf: 'areas'`, which counts Housing Growth Areas; `statsTitle`
+names the key. A count with a `color` shows a map-key swatch; omit `color` when
+municipalities are unfilled. An `areaKey` entry of `[color, label, 'outline']` draws
+an outline swatch.
+Steps marked `municipalFill: true` limit hover to municipalities; other steps
+limit hover to area polygons. The hovered polygon's fill darkens slightly; over
+category polygons, the whole Housing Growth Area under the pointer is shaded. Dragging
+or zooming clears hover, and polygons ignore hover mid-drag. A drag ends when the
+pointer leaves the map or window, so a release outside it is never lost. Leaflet's SVG renderers
+draw polygons half a view beyond each edge (`padding: 0.5`), so short drags reveal
+no undrawn shapes. For example,
 `item.kind === 'tier' ? {opacity: 0.9, fillOpacity: 0.6} : {}` reveals Tier 1B.
 Transitions target shared `town`, `area`, and `tier` layers; hidden polygon
 interactions follow their sampled opacity, regardless of chapter order.
+`overlays` lists the polygon layers a story uses (`area`, `tier`,
+`housing-category`, `housing-block`, `housing-coverage`); only those are mounted on
+the map. `housing-block` outlines never take hover.
 To add a story, register a unique ID in a new `web/story-*.js` file and include it
 before `dashboard.js` in `analyze.py`'s script list. New polygon datasets still need
 a provenance-validated export and a layer adapter in `dashboard.js`; story files
@@ -179,7 +213,8 @@ transition from 50% to 100%. Both arrive at the next dot together.
 Desktop fitting uses the map zone's actual bounds, with 32px outer margins and
 space reserved for Focus at its top center, with a downward-opening menu. The
 horizontal −/+ zoom pill sits beside Focus in a centered group with a 16px gap;
-both pills are 38px tall. Zoom changes by half a level.
+both pills are 38px tall. Zoom changes by half a level. Trackpad pinches zoom the map rather than the page;
+plain wheel scrolling still advances the story.
 The vertical timeline occupies a separate right-hand strip beyond the cards;
 cards and timeline share the same vertical center at each step. A dot grows only
 once reached, and shrinks halfway into the next interval as its overlay leg starts.

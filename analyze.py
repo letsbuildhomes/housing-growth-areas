@@ -7,7 +7,7 @@ from pathlib import Path
 import tempfile
 
 import duckdb
-from config import ROOT, DB_PATH, DASHBOARD_DIR, EXPORT_DIR, MEMBERSHIP_PATH, MEMBERSHIP_VERSION
+from config import ROOT, DB_PATH, DASHBOARD_DIR, EXPORT_DIR, MEMBERSHIP_PATH, MEMBERSHIP_VERSION, HOUSING_RULES
 from transform import load_prepared, MEMBERSHIP_BASIS
 
 
@@ -227,19 +227,95 @@ def export_tier1b(con):
     sources = con.execute('''SELECT DISTINCT url FROM ingest_sources WHERE run_id=?
         AND source_id IN (SELECT unnest(?::VARCHAR[])) ORDER BY url''',
         [stamp['snapshot_id'], source_ids]).fetchall()
+    dates = dict(con.execute('''SELECT feature_id, date_lurb FROM map_features
+        WHERE kind='tier' AND tier_code='1B' ORDER BY feature_id, date_lurb''').fetchall())
     return {'title': 'Tier 1B boundaries', 'schema_version': 3,
             'source_view': 'prepared municipal Tier 1B; furthest stage per RPC',
             'source_urls': [r[0] for r in sources], 'processing_rules': document['rules'],
             'display_simplification': {'rules': DISPLAY_SIMPLIFICATION,
                                       'engine': 'DuckDB ' + duckdb.__version__,
                                       'fallbacks': simplification_audit},
-            'source_records': {str(i): document['audit']['sources'][i] for i in source_indices},
+            'source_records': {str(i): {**document['audit']['sources'][i],
+                'date_lurb': dates.get(document['audit']['sources'][i]['feature_id'])}
+                for i in source_indices},
             'summary': {stage: sum(f['properties']['map_stage']==stage for f in features)
                         for stage in ('pre_application','application','approved')},
             'areas': {'type':'FeatureCollection','features':features}}
 
 
-EXPORTERS = {'interim-areas': export_interim, 'map': export_map, 'tier1b': export_tier1b}
+def export_housing_growth(con):
+    """Publish validated analytical geometry separately from interim table data."""
+    from transform import load_housing_growth
+    db_file = con.execute("SELECT path FROM duckdb_databases() WHERE database_name=current_database()").fetchone()[0]
+    document = load_housing_growth(con, Path(db_file).parent / 'housing-growth.json')
+    audit = document.pop('audit')
+    # Keep the full projected-WKB repair/assignment audit in the saved sidecar.
+    # Web consumers need lineage and counts, not duplicate detailed geometry.
+    document['audit_summary'] = {
+        key: len(value) for key, value in audit.items()
+        if isinstance(value, list) and key != 'sources'
+    }
+    document['prepared_provenance'] = {
+        'sidecar': 'data/housing-growth.json',
+        'inputs_sha256': document['inputs_sha256'],
+        'rules_version': document['rules']['version'],
+    }
+    # Municipal area in the analysis CRS gives hover labels a share-of-municipality denominator.
+    con.execute('LOAD spatial')
+    town_areas = dict(con.execute('''SELECT geoid,ST_Area(ST_Transform(geom,'EPSG:4326',?,always_xy:=true))
+        FROM current_features WHERE kind='municipality_boundary' AND geom IS NOT NULL''',
+        [HOUSING_RULES['crs']]).fetchall())
+    for town in document['municipalities']:
+        town['municipality_area_m2'] = town_areas.get(town['geoid'])
+    document['summary'] = {
+        'blocks': len(document['blocks']['features']),
+        'municipalities': {status: sum(town['status'] == status for town in document['municipalities'])
+                           for status in ('all', 'some', 'none', 'no_housing', 'unknown')},
+        'meaningful_tier_outside': sum(item['meaningful'] for item in document['reverse_diagnostics']),
+        'context_fragments': len(document.get('context_fragments', {}).get('features', [])),
+        'coverage_parts': len(document.get('coverage_parts', {}).get('features', [])),
+    }
+    source_ids = sorted({source['source_id'] for source in
+                         document['sources'] + document.get('tier_sources', [])
+                         if source.get('source_id') is not None})
+    urls = con.execute('''SELECT DISTINCT url FROM ingest_sources WHERE run_id=?
+        AND (source_id IN (SELECT unnest(?::VARCHAR[])) OR source_id IN
+             (SELECT source_id FROM current_layers
+              WHERE kind IN ('municipality_boundary','rpc_boundary')))
+        ORDER BY url''',
+        [document['snapshot_id'], source_ids]).fetchall()
+    fallbacks = {}
+    part_counts = {}
+    for feature in document.get('coverage_parts', {}).get('features', []):
+        block_id = feature['properties']['block_id']
+        part_counts[block_id] = part_counts.get(block_id, 0) + 1
+    retained_split_blocks = sorted(block_id for block_id, count in part_counts.items() if count > 1)
+    with duckdb.connect(':memory:') as display_con:
+        display_con.execute('LOAD spatial')
+        for name in ('categories', 'blocks', 'coverage_parts', 'tier_outside', 'context_fragments'):
+            for feature in document.get(name, {}).get('features', []):
+                # Complementary pieces share a computed boundary. Retain both
+                # original shapes rather than simplifying that edge separately.
+                if name == 'coverage_parts' and part_counts[feature['properties']['block_id']] > 1:
+                    continue
+                feature['geometry'], detail = simplify_display_geometry(display_con, feature['geometry'])
+                if detail['retained_parts'] or detail['feature_fallback']:
+                    fallbacks[f'{name}:{feature["id"]}'] = detail
+    document['display_simplification'] = {
+        'rules': DISPLAY_SIMPLIFICATION, 'engine': 'DuckDB ' + duckdb.__version__,
+        'fallbacks': fallbacks,
+        'coverage_parts_policy': 'retain detailed complementary pieces; simplify single-piece blocks',
+        'retained_split_block_ids': retained_split_blocks,
+    }
+    # Prepared geometry remains authoritative: areas/classifications are copied
+    # unchanged and are never measured again from simplified browser geometry.
+    return {**document, 'title': 'Housing growth areas and mapped Tier 1B',
+            'source_view': 'prepared housing growth blocks; selected FLU and Tier 1B stages per RPC',
+            'source_urls': [row[0] for row in urls]}
+
+
+EXPORTERS = {'interim-areas': export_interim, 'map': export_map, 'tier1b': export_tier1b,
+             'housing-growth': export_housing_growth}
 
 
 def export_all(db_path=DB_PATH, output=EXPORT_DIR, memberships_path=MEMBERSHIP_PATH):
@@ -312,9 +388,10 @@ def build(output=DASHBOARD_DIR):
     dataset = json.loads((output / 'data' / 'interim-areas.json').read_text())
     map_dataset = json.loads((output / 'data' / 'map.json').read_text())
     tier_dataset = json.loads((output / 'data' / 'tier1b.json').read_text())
+    housing_dataset = json.loads((output / 'data' / 'housing-growth.json').read_text())
     manifest = json.loads((output / 'data' / 'manifest.json').read_text())
     for key in ('snapshot_id', 'captured_at', 'exported_at'):
-        if not manifest.get(key) or any(d.get(key) != manifest[key] for d in (dataset, map_dataset, tier_dataset)):
+        if not manifest.get(key) or any(d.get(key) != manifest[key] for d in (dataset, map_dataset, tier_dataset, housing_dataset)):
             raise ValueError(f'Mismatched or missing export {key}; run make export.')
     if dataset['schema_version'] != 1:
         raise ValueError('Unsupported interim export schema')
@@ -322,6 +399,8 @@ def build(output=DASHBOARD_DIR):
         raise ValueError('Unsupported map export schema')
     if tier_dataset['schema_version'] != 3:
         raise ValueError('Unsupported Tier 1B export schema')
+    if housing_dataset['schema_version'] != 1:
+        raise ValueError('Unsupported housing growth export schema')
     substitutions = {
         '{{LOGO}}': 'data:image/svg+xml;base64,' + base64.b64encode((ROOT / 'web' / 'assets' / 'lbh-logo.svg').read_bytes()).decode('ascii'),
         '{{STYLES}}': (ROOT / 'web' / 'dashboard.css').read_text(),

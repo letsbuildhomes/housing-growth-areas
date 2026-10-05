@@ -482,9 +482,11 @@ full geometry, including border spillovers. Other overlays fade out independentl
 of story styling; basemap tiles remain visible everywhere.
 
 The preserved `act181` story (currently disabled) uses the following chapter
-sequence. The active saved-map overview independently introduces boundaries,
-publisher-reported interim eligibility, then the selected working Tier 1B map;
-it does not introduce a new analytical comparison or change export contracts.
+sequence. The active four-chapter housing growth story introduces qualifying
+future land use, highlights municipalities with included growth areas, compares
+growth blocks with mapped Tier 1B, and summarizes municipal coverage.
+Its independent schema-1 export leaves the existing map/table contracts
+unchanged; the methodology is documented below.
 
 The original fourth chapter overlays the working Tier 1B map in teal (#287f89),
 with 60% fill opacity. Hover labels identify the selected stage and RPC.
@@ -619,3 +621,362 @@ recompute visible row spans and counts without changing order. Yes is pale blue,
 No pale red, and Unknown gray. Publisher eligibility is never recalculated.
 Infrastructure summarizes water/wastewater/soils with three-valued OR; development
 areas display zoning as not separately required while retaining the source null.
+
+### Housing growth comparison — October 5, 2026
+
+The question is whether mapped Tier 1B represents the geography planned for
+housing growth. Housing growth includes future land use codes `VA` (Village
+Area), `VC` (Village Center), `PGA` (Planned Growth Area), and `DC` (Downtown
+Center). The opening map uses one color family, from lightest `VA` to darkest
+`DC`. Category pieces retain their source identity for display; analysis groups
+nearby pieces across categories into growth blocks within each municipality.
+Pieces within 100 m (`HOUSING_RULES.grouping_gap_m`) are connected to bridge roads
+and mapping gaps, with chaining allowed. The grouping buffer is intersected back with the original
+prepared shapes, so the gap helps identify a block without adding gap acreage.
+
+The comparison selects the furthest populated original FLU stage per RPC,
+including non-housing FLU records when determining whether a stage is populated.
+Tier 1B retains its separately selected regional working stage. Neither selection
+falls back per town or combines historical stages. Selected FLU and Tier 1B stages
+are reported separately, together with comparison completeness. A stage mismatch
+is a comparison limitation, not evidence of a historical gain or loss.
+
+Pipeline stage uses text in hover details rather than a second color system.
+Source submission version, LURB status, and LURB action date are preserved through
+source lineage and remain distinct from map stage. Coverage describes **mapped
+Tier 1B representation**, not legal eligibility, final approval, or the date an
+area became Tier 1B. Spatial results cannot establish whether a proposed boundary
+is permitted by law.
+
+Preparation reads the saved database without changing it. It reuses the municipal
+Tier 1B assignment approach (projected meters, interior qualification beyond a
+boundary band, audited fragments and spillover), explicitly for this new FLU
+analysis. It does not change approved interim-area memberships. Raw source
+geometries, all original stages, excluded fragments, failed/unassigned source
+records, and lineage remain available.
+
+Coverage is measured on detailed prepared geometry in EPSG:32145. Tier 1B is
+unioned before intersection so overlapping source records cannot inflate the
+covered area. Each block retains total area, covered area, and covered fraction.
+Block outcomes are substantial, partial, none, or unknown. A municipality with
+every block substantially represented is `all`; mixed block outcomes or a
+materially partial block are `some`; all blocks without meaningful coverage are
+`none`. Municipalities without growth blocks are `no_housing`; incomplete inputs
+use `unknown` rather than appearing as no Tier 1B coverage.
+
+The reverse diagnostic measures Tier 1B area outside the selected housing growth
+union. It retains outside area/fraction and source stages, using area and fraction
+tolerances to distinguish meaningful differences from edges. This is an audit
+result: proposed stages can change during review, stage mismatches can explain
+differences, and the diagnostic does not declare a legal violation. It is retained
+without introducing a separate application workflow.
+
+Comparison uses selected regional unions, avoiding false uncovered borders when
+FLU and Tier 1B protrusions receive different municipal ownership. Municipal
+ownership still follows the recorded assignment rules. Valid polygon components
+with no qualifying municipality remain context outside the analytical population;
+they do not create uncertain municipal classifications. Missing housing
+geometry or absent selected FLU classifications cannot be localized reliably and
+make the affected RPC uncertain. Known non-housing FLU with absent geometry does
+not hide a housing block. Non-housing codes such as `RD`, `WA`, and `X` remain
+outside the four-category selection even if no display-name mapping exists.
+Complete FLU establishes `no_housing` even if Tier 1B is
+unavailable; missing Tier 1B prevents classification of existing growth blocks.
+
+`data/housing-growth.json` is the derived sidecar; the independent public
+`out/dashboard/data/housing-growth.json` uses schema 1. Its `categories`, `blocks`,
+`coverage_parts`, `tier_outside`, and retained `context_fragments` are GeoJSON collections.
+`municipalities` is a lightweight
+summary array keyed by official GEOID; `sources` provides FLU source feature/object/
+layer identifiers and publisher stage/status fields. `tier_sources` provides the
+separate Tier 1B lineage; `tier_source_indices` link diagnostic features to that
+array, while category/block `source_indices` link to FLU `sources`. `selected_stages`,
+`tier_selected_stages`, `reverse_diagnostics`, `sensitivity`, versioned `rules`,
+input fingerprint, and preparation audit make the analysis inspectable.
+The full projected-WKB audit remains in the sidecar; the public export carries
+audit counts and a pointer/fingerprint identifying that prepared provenance.
+Public geometry uses the same guarded 0.5 m display simplification as Tier 1B,
+with per-part and whole-feature fallbacks recorded. Complementary covered and
+uncovered pieces of a split block retain their detailed geometry to preserve
+their shared boundary; single-piece blocks use the guarded simplification.
+Areas and classifications are
+copied unchanged from preparation, never measured from simplified browser
+coordinates. The manifest registers this dataset, and page assembly and browser
+loading validate its schema and generation alongside the existing exports.
+
+Municipality assignment, block connectivity, substantial coverage, and meaningful
+reverse differences use separate controls because they address different errors.
+These analytical thresholds are provisional methodology choices; the sidecar
+records their exact values and sensitivity results. Borderline examples and
+changes under nearby thresholds must be inspected before interpreting a
+municipality's classification as a substantive planning difference. Changing
+rules invalidates the prepared fingerprint and requires `make prepare`.
+
+October 5, 2026 audit update: `TIER_RULES.version` advances to 2 to record source
+geometries whose repair/extraction yields no polygonal parts as an explicit
+preparation failure. The existing 75 m qualification, 1.5 m closing, 1 m² fragment
+minimum, splitting, and spillover geometry rules are unchanged. Housing
+preparation fingerprints the Tier processing rules separately from its own rules
+so either derivation's rule changes invalidate the comparison sidecar.
+
+Initial provisional controls reuse the 75 m interior band, 1.5 m closing radius,
+and 1 m² fragment minimum. A coverage discrepancy is tolerated when it is at most
+1% of its block, or when it is both at most 5% and at most 1,000 m². Substantial
+coverage tolerates that amount of uncovered area; no coverage tolerates that
+amount of covered area; other blocks are partial. The reverse diagnostic has
+independent controls with the same initial tolerance: 1% of total Tier 1B area,
+or both 5% and 1,000 m². Every measured outside difference remains available,
+including those below the flagging threshold. Sensitivity compares
+tighter limits (at most 1% **and** 250 m², without the independent 1% allowance)
+and looser limits (2%, or both 10% and 2,500 m²), retaining changed block IDs and
+counts rather than silently changing the baseline classification. These are
+analytical tolerances, not statutory thresholds.
+
+Grouping investigation, October 5, 2026: regrouping the detailed prepared union
+with gaps of 0, 10, 20, 30, and 50 m produced 810, 761, 514, 485, and 457 statewide
+blocks respectively. Bristol's corresponding counts were 34/28/3/2/2;
+Middlebury's were 35/32/5/3/3; Vergennes's were 49/43/4/4/2. The initial 30 m rule
+reduces fragmentation across roads while keeping separations that a 50 m rule
+would merge. Its 485 block geometries are valid and preserve the underlying
+prepared union area, 538,717,287.115 m². This evidence supports a provisional
+grouping choice; changing the gap can change block-based municipal summaries.
+
+Grouping revision, October 5, 2026: at statewide scale, 30 m left adjoining
+pieces of one settlement as separate Housing Growth Areas. Regrouping the same
+selected stages gave 485, 443, 406, 394, 392, and 385 blocks at 30, 60, 100, 150,
+200, and 400 m. Most merging happens by 100–150 m: at 100 m Fair Haven, West
+Rutland, Vergennes, and Barre City go from 4–5 blocks to 1. The step from 100 to
+150 m merged 10 more pairs or triples (gaps of 100–147 m), including two large
+Castleton areas (476.9 and 444.0 acres) and three in Colchester; every merged piece
+already shared its coverage status. On review, 100 m was preferred so those stay
+separate. Going from 150 to 400 m merged only 9 more, including Bristol,
+Middlebury, and Shelburne, where some blocks are separate villages.
+`HOUSING_RULES` version 5 adopts 100 m. Prepared union area is unchanged at
+538,717,287.115 m², and municipal outcomes are unchanged at every tested gap
+(87 all, 13 some, 133 none, 23 no housing growth areas). The 406 blocks classify as
+157 substantial, 9 partial, and 240 none, and all are comparable.
+
+Recorded October 5, 2026 before the boundary-context revision, for saved capture
+`20261005T155533.479832Z`: the selected
+housing sources comprise 745 FLU records. The 485 blocks include 199 substantial,
+8 partial, 258 without meaningful coverage, and 20 unknown blocks. Municipality
+summaries are 84 all represented, 12 partly represented, 131 none represented,
+23 without housing growth areas, and 6 unknown. Independent read-only DuckDB
+checks matched all selected FLU source IDs/layers, publisher versions, statuses,
+dates, and nulls, plus all 553 retained Tier source lineage records.
+
+No reverse difference exceeds the initial meaningful-portion tolerance in this
+capture. The largest measured outside area is Hyde Park's approved comparison:
+3,385.016 m², or 0.226% of its mapped Tier 1B area. The complete diagnostic retains
+this difference rather than treating tolerated edges as geometrically identical.
+Tighter coverage tolerances change three blocks and looser tolerances change
+one; neither changes the municipal all/some/none summaries in this capture.
+These observations describe the saved capture and provisional method, not a
+legal determination or a live application status.
+
+#### Boundary fragment review — October 5, 2026
+
+After inspecting the retained boundary fragment, the user identified the orange
+component in Saint Albans City as an overhang of Saint Albans Town's housing
+growth area caused by mismatched boundary datasets. The observed source is
+`21062efe90373f63:21295`, connected part 1, approved `PGA`, in capture
+`20261005T155533.479832Z`. This explanation motivates generic boundary-mismatch
+handling. It does not install a source-ID, part-ID, or municipality exception.
+Display geometry and source lineage remain available while a general geometric
+rule determines whether a fragment participates in analysis.
+
+The revised processing decision reuses the existing 75 m municipal
+interior-qualification rule to define the analytical population, recorded in
+`HOUSING_RULES.version` 2. Valid polygon components recorded as
+`no qualifying municipality` stay outside analysis and do not make an entire
+municipality uncertain. There is no additional thinness, proximity, area-budget,
+source-ID, or municipality exception. Missing geometry, geometry that cannot
+yield polygonal parts, and unusable source-stage comparisons remain uncertain.
+
+Excluded components retain their complete prepared shape in the additive
+schema-1 `context_fragments` collection, with source indices, source category and
+stage, original projected-geometry SHA-256, area, `context_reason`, and
+`analytical_included: false`. They remain saved context and do not become
+growth blocks, contribute housing acreage, or enter coverage denominators.
+The complete preparation audit retains their original component and processing
+decision. Valid unassigned Tier 1B components follow the same population rule.
+Tier comparison geometry excludes the context mask outside accepted housing
+geometry so reverse diagnostics use the same population; original Tier display
+geometry stays intact and excluded comparison area is recorded separately.
+`boundary_context` records the qualification basis, excluded FLU component count
+and area, and Tier source-part/hash adjustment records. Reverse diagnostics retain
+`display_tier_area_m2`, `analytical_excluded_m2`, and the adjusted `tier_area_m2`
+so the population change can be reconciled without rewriting display geometry.
+This processing decision defines the population being compared, not the intent
+behind every excluded polygon. In particular, Derby's isolated Village Area
+component is excluded by the same existing qualification rule; it is not labeled
+a mapping artifact merely because it is separate from the other housing areas.
+
+Recorded October 5, 2026 after this revision, using the same saved capture:
+all six previously uncertain municipalities are resolved. Vergennes, Saint
+Albans City, and Derby are `all`; Essex and East Montpelier are `none`;
+Woodstock is `some`. Statewide results are **87 all, 13 some, 133 none, 23
+no housing growth areas, and 0 unknown**. The 485 unchanged analytical blocks
+classify as 207 substantial, 9 partial, and 269 without meaningful coverage.
+
+The context collection retains 19 original FLU components totaling
+36,126.924 m²; their source-part identifiers, projected geometry hashes, and
+areas reconcile with the prior audit. Eleven selected unassigned Tier components
+totaling 23,190.172 m² are excluded by the same existing qualification rule.
+The context mask removes a further 2,056.100 m² from the assigned Tier comparison
+geometry. Each adjusted Tier area plus its recorded excluded area reconciles
+with the original display area within 0.000002 m². No meaningful reverse
+difference remains; the largest measured difference remains Hyde Park at
+approximately 3,385.016 m², or 0.226%.
+
+Before/after checks confirm identical block identifiers, block shapes, housing
+area denominators, category geometry, source lineage, and selected stages.
+Clipping and projected-coordinate round trips change covered-area measurements
+by at most 0.001363 m² (verified below a 0.01 m² numerical tolerance); no
+previously classified municipality changes category. All six municipal changes
+come from resolving the prior unknown classifications. The raw database SHA-256
+is unchanged. Tighter and looser coverage sensitivity checks leave the resulting
+87/13/133 all/some/none counts unchanged.
+
+#### Story presentation revision — October 5, 2026
+
+The map omits excluded boundary fragments. Their `context_fragments` data,
+original geometry hashes, and audit records remain available for research;
+this presentation change does not alter the analytical population or public
+data contract. The story has four chapters: land-use categories, municipalities
+with included growth areas, block coverage by mapped Tier 1B, and municipal
+Tier 1B coverage.
+
+The added municipality chapter distinguishes **233 municipalities with included
+growth blocks** from **23 with no included growth areas**, accounting for all
+256 reference municipalities. In this saved capture, `no_housing` corresponds
+exactly to zero included blocks. This describes the selected mapped stages and
+analysis population; it is not a claim that those municipalities never had
+growth areas historically.
+
+“Cannot assess” is shown only when the loaded municipal or block classifications
+contain unknowns; the current capture has none. “No included growth areas” stays
+distinct from no Tier 1B coverage. Independent checks agree between prepared
+and public exports: all 256 municipalities, 485 blocks, and 100 reverse
+comparisons are comparable. The 403 category features have known selected FLU
+classes/stages and valid source lineage; they do not carry a separate analytical
+comparison status. Publisher approval nulls remain source-stage details rather
+than implying an unknown spatial comparison.
+
+#### Coverage polygon presentation — October 5, 2026
+
+The overlap chapter now displays actual spatial portions rather than assigning
+one fill color to each entire growth block. `coverage_parts` contains the
+intersection of each block with the selected regional Tier 1B comparison union
+(`coverage_kind: covered`) and its difference (`uncovered`). Empty portions are
+omitted, but positive-area differences are not removed by the classification
+tolerances. Covered geometry is green and uncovered geometry is red. Unknown
+comparisons, when present, retain the whole block as an unknown portion.
+
+Each portion preserves its parent's `block_id`, stage, comparison status, source
+lineage, block `area_m2`, covered area/fraction, and block classification.
+`portion_area_m2` records the area of that particular covered or uncovered shape.
+Hover details distinguish portion acreage from total block acreage.
+`HOUSING_RULES.version` 3 invalidates preparation for this added geometry;
+the additive public contract retains schema 1.
+
+Yellow is reserved for municipalities classified `some`. A meaningful partial
+block or a mixture of represented and unrepresented blocks yields a yellow
+municipality; every block substantially represented yields green, while no
+meaningful block coverage yields red. Existing small-difference tolerances govern
+these municipal summaries, independently of the exact green/red portion shapes.
+The four-chapter sequence and analytical population stay unchanged.
+
+The drawable partition is constructed in WGS84 from the valid parent block and
+Tier comparison geometry. Constructing polygon overlays in projected coordinates
+and then transforming their vertices independently can create invalid rings in
+browser coordinates, especially along nearly coincident edges. Projected
+analytical areas and block classifications remain authoritative and unchanged.
+`coverage_display` records numerical portions that collapse to an empty browser
+representation; their original projected areas and geometry remain in the audit.
+These are serialization outcomes, not classification-tolerance exclusions.
+
+Export preserves both detailed display shapes whenever a block has covered and
+uncovered portions. Simplifying their common edge independently could introduce
+gaps or overlaps. Whole-block covered/uncovered/unknown portions use the existing
+guarded display simplification. `display_simplification.coverage_parts_policy`
+and `retained_split_block_ids` record that choice; analytical areas and statuses
+are copied unchanged.
+
+Recorded October 5, 2026: the final drawable collection has 561 valid WGS84
+features, 224 covered and 337 uncovered. Projected analytical totals remain
+374,241,321.923 m² covered and 164,475,965.190 m² uncovered. The audit retains
+147 numerical portions with empty browser geometry, totaling 0.000422 m² of
+original projected area. Municipal outcomes remain 87 all, 13 some, 133 none,
+23 no included growth areas, and 0 unknown.
+
+Covered and uncovered display pieces have no overlapping area. The largest
+reconstructed block difference is 2.204 m² and the largest display-versus-analysis
+portion-area difference is 3.521 m². These minor coordinate/overlay differences
+are acceptable for the statewide visualization; no additional precision
+handling is introduced. Block shapes, analytical areas, classifications, source
+lineage, and the raw database remain unchanged.
+
+#### Coverage sliver absorption — October 5, 2026
+
+Supersedes the WGS84 paired display partition above. Growth and Tier 1B maps
+trace nearly identical edges, and the exact partition contained 2,120 uncovered
+polygon pieces, 1,781 of which vanish under a 2 m inward buffer (about
+5,210 m² in total); covered pieces had 515 such slivers. They flickered as
+red hairlines at most zoom levels.
+
+`split_housing_block` now partitions each block once in EPSG:32145. Every
+covered or uncovered piece narrower than twice `HOUSING_RULES.coverage_sliver_m`
+(2 m) joins the kind of its largest wider neighbor, or keeps its own kind when
+it has none. Pieces come from one overlay and share exact edges, so merged
+portions tile the block without subtraction residue. The projected portions
+are transformed for display, with a validity repair for float-precision ring
+contacts. `covered_m2` and `coverage_fraction` measure the absorbed portions;
+`exact_covered_m2` retains the unadjusted intersection. `HOUSING_RULES.version`
+4 invalidates earlier preparation; `coverage_display` and
+`audit.coverage_display_omitted_parts` are no longer produced.
+
+Recorded October 5, 2026: 502 drawable features, 216 covered and 286 uncovered.
+Covered area is 374,245,907.844 m² against 374,241,321.923 m² exact
+(+4,585.9 m²). No block coverage status or municipal outcome changed: 87 all,
+13 some, 133 none, 23 no included growth areas, and 0 unknown. Of 361
+uncovered polygon pieces, 18 are specks under 0.01 m² inside tiny blocks or
+touching neighbors at a point, and 4 (10–115 m²) are narrow uncovered areas with
+no wider neighbor. Only 17 blocks remain split for display, so the public
+export's coverage collection is 6.4 MB.
+
+#### Housing Growth Area presentation — October 5, 2026
+
+The story now calls each prepared block a **Housing Growth Area**: Downtown
+Center, Village Center, Planned Growth Area, and Village Area polygons within
+the grouping gap (100 m since rules version 5) in one municipality. The opening
+chapter outlines blocks over their category polygons and counts blocks, not
+municipalities. The overlap chapter counts blocks by `coverage_status` (“Covered
+by Tier 1B”, partly covered, not covered). Municipal hovers list every nonzero
+block outcome, so a partly covered block is never reported as uncovered. Areas crossing a municipal line remain one
+block per municipality, as in the analysis.
+
+Hovers report one **submission stage**, the selected regional `map_stage`
+(pre-application, application, or approved). In this snapshot the selected FLU
+and Tier 1B stages match in every RPC, and source fields follow the stage
+exactly: pre-application records are `PRE` with no LURB status; application
+records are `APP`, with LURB status null (BCRC) or `RCV` (MARC); approved records
+are `APP` with LURB status `APR` and an action date. Submission version, LURB
+status, and date remain in source lineage and are no longer shown. If the FLU and
+Tier 1B stages ever differ, municipal and coverage hovers name both.
+
+The reverse diagnostic and comparison-status notes are no longer displayed; none
+applied to this snapshot (0 meaningful diagnostics, all blocks comparable).
+Both remain in the export, and unknown classifications still appear in keys
+when present.
+
+The browser hides covered or uncovered pieces under one acre when their block
+has more than one piece. With 30 m grouping this hid 12 pieces (largest
+111.0 m², total 198.3 m²); with 100 m grouping it hides 7 (1 covered, 6 uncovered;
+2.0 m² in total), and no whole block is under one acre. The export, block areas,
+and classifications are unchanged.
+
+The export adds `municipalities[].municipality_area_m2`, measured from the saved
+municipal boundary in EPSG:32145 at export time, so growth hovers can give the
+Housing Growth Area share of a municipality. This additive field keeps schema 1;
+all 256 municipalities have an area.

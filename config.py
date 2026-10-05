@@ -10,8 +10,20 @@ DB_PATH = DATA_DIR / 'act181_ingest.duckdb'
 DASHBOARD_DIR = OUT_DIR / 'dashboard'
 EXPORT_DIR = DASHBOARD_DIR / 'data'
 MEMBERSHIP_PATH = DATA_DIR / 'municipality-memberships.json'
-TIER_RULES = {'version': 1, 'crs': 'EPSG:32145', 'boundary_band_m': 75,
+TIER_RULES = {'version': 2, 'crs': 'EPSG:32145', 'boundary_band_m': 75,
               'closing_radius_m': 1.5, 'minimum_part_m2': 1}
+HOUSING_PATH = DATA_DIR / 'housing-growth.json'
+HOUSING_RULES = {'version': 5, **{k: v for k, v in TIER_RULES.items() if k != 'version'},
+                 'categories': ['VA', 'VC', 'PGA', 'DC'],
+                 'grouping_gap_m': 100,
+                 'missing_flu_policy': 'unknown code or missing housing geometry',
+                 'coverage_sliver_m': 2,
+                 'coverage_near_complete_fraction': 0.01,
+                 'coverage_tolerance_fraction': 0.05,
+                 'coverage_tolerance_m2': 1000,
+                 'reverse_near_complete_fraction': 0.01,
+                 'reverse_tolerance_fraction': 0.05,
+                 'reverse_tolerance_m2': 1000}
 
 
 # Publisher value mappings

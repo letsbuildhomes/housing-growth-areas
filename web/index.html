@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="Explore Vermont's interim Act 250 exemption areas, municipal boundaries, RPC boundaries, and reported eligibility criteria.">
+  <meta name="description" content="Compare Vermont's Housing Growth Areas with Tier 1B maps, and explore publisher-reported interim Act 250 exemption eligibility.">
   <title>Act 181 implementation · Let's Build Homes</title>
   <style>{{LEAFLET_CSS}}</style>
   <style>{{STYLES}}</style>
@@ -17,13 +17,13 @@
     <p id="data-status" role="status">Loading dashboard data…</p>
     <div class="page-heading">
       <div><p class="eyebrow">Vermont · Map + table</p><h1>Act 181 implementation</h1>
-        <p class="intro">Explore likely exemption eligibility and the criteria reported for each area.</p></div>
+        <p class="intro">Compare Vermont's Housing Growth Areas with Tier 1B maps, then explore interim exemption records.</p></div>
       <p class="capture">Source snapshot <strong id="capture-date">—</strong></p>
     </div>
-    <section class="map-panel" id="map-walkthrough" aria-label="Map of interim exemption areas and Vermont boundaries">
+    <section class="map-panel" id="map-walkthrough" aria-label="Housing Growth Areas and Tier 1B map story">
       <div class="map-stage">
       <div class="map-layout">
-        <div id="map" class="map" role="region" aria-label="Interactive map of Vermont interim areas, towns, and regional planning commissions"></div>
+        <div id="map" class="map" role="region" aria-label="Interactive map of Vermont Housing Growth Areas, Tier 1B, towns, and regions"></div>
         <section class="map-story" aria-label="Map story"></section>
       </div>
           <nav class="story-navigation" aria-label="Map story navigation">
@@ -45,7 +45,7 @@
       <p id="basemap-status" class="basemap-status" role="status" hidden>Street map unavailable. Saved area and boundary layers remain visible.</p>
       </div>
     </section>
-    <div class="data-heading" id="area-data" tabindex="-1"><p class="eyebrow">Explore the records</p><h2>Every area, town by town.</h2><p>Search the saved snapshot and compare publisher-reported eligibility.</p></div>
+    <div class="data-heading" id="area-data" tabindex="-1"><p class="eyebrow">Interim exemption records</p><h2>Every area, town by town.</h2><p>Search the saved interim areas and compare publisher-reported eligibility.</p></div>
     <section class="table-panel" aria-label="Interim areas by municipality">
       <form class="toolbar" id="filters" role="search">
         <div class="search-control"><label for="search">Find a municipality or area</label><input id="search" type="search" placeholder="Search by name…" autocomplete="off"></div>
@@ -87,7 +87,8 @@
       <p>Downtowns and village centers need both requirements. “Not separately required” means zoning is not stated as a separate condition in the exemption clause; it does not mean there are no zoning obligations. The source zoning value remains unreported. These display groupings do not recalculate publisher eligibility or evaluate every project-specific requirement.</p>
       <p>Municipality groups use the source’s labels, which can include locality names. Missing municipality labels would appear under “Unknown municipality.”</p>
       <p>These are the first three layers of the <a href="https://experience.arcgis.com/experience/d96022b7dce64945a326e7bf98a2f365/" target="_blank" rel="noopener noreferrer">Vermont interim Act 250 map</a>. The page uses a saved snapshot, not a live feed.</p>
-      <p>Map keys describe each chapter’s visible layers. Municipality counts use recorded membership with a reviewed name crosswalk, not buffer overlaps or whole-town exemptions. Shared areas count for both named municipalities but remain one area. The street basemap requires internet access; saved boundaries, areas, and the table work offline.</p>
+      <p>Housing Growth Areas are the Downtown Center, Village Center, Planned Growth Area, and Village Area polygons on each region’s future land use map. Polygons within 100 m of each other in the same municipality count as one Housing Growth Area. The map compares them with Tier 1B from each region’s furthest submitted map: pre-application, application, or approved. Hover labels call this the submission stage; most regional maps are not yet approved. Municipality colors summarize coverage; they do not establish legal eligibility or approval. Missing geometry or incompatible stages are shown as unknown. Covered and uncovered pieces under one acre within a larger area are hidden as boundary slivers but still count toward coverage.</p>
+      <p>The interim table uses source labels and the reviewed membership crosswalk. Shared interim areas count for both named municipalities but remain one area. The street basemap requires internet access; saved boundaries, areas, and the table work offline.</p>
       <p class="source-meta" id="source-meta"></p>
     </div></details>
     <footer>Let’s Build Homes <span>Vermont · Housing data explorer</span></footer>

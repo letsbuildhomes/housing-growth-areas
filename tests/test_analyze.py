@@ -113,6 +113,7 @@ class DashboardTests(unittest.TestCase):
             payload = {**common, 'schema_version': 1, 'name': '</script><img src=x onerror=alert(1)>&'}
             (output / 'data' / 'interim-areas.json').write_text(json.dumps(payload))
             (output / 'data' / 'tier1b.json').write_text(json.dumps({**common, 'schema_version': 3}))
+            (output / 'data' / 'housing-growth.json').write_text(json.dumps({**common, 'schema_version': 1}))
             (output / 'data' / 'map.json').write_text(json.dumps({
                 **common, 'schema_version': 2, 'areas': {'type': 'FeatureCollection', 'features': []},
                 'towns': {'type': 'FeatureCollection', 'features': []},

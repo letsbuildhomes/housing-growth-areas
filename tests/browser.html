@@ -43,19 +43,113 @@ const assert = {
 const display = EligibilityDisplay;
 const {compile, player, timing} = window.MapStoryAnimation;
 test('active story has independent chapters and reversible polygon visibility', () => {
-  const context = {tierData: {areas: {features: []}}, colors: {
-    positive: '#112233', negative: '#445566', unknown: '#778899'}, areaColor: () => '#112233'};
+  const context = {housingData: {municipalities: []}, colors: {
+    positive: '#112233', negative: '#445566', unknown: '#778899', partial: '#cf9a35',
+    gain: '#399b55', neutral: '#e2e6e3', villageArea: '#bedde4', villageCenter: '#7bb6c5',
+    plannedGrowth: '#38889f', downtown: '#15566b'}};
   const story = MapStories.create(context);
-  assert.equal(story.steps.length, 3);
-  const initial = ['area', 'tier'].map(kind => ({kind, props: {},
+  assert.equal(story.steps.length, 4);
+  const initial = ['area', 'tier', 'housing-category', 'housing-block', 'housing-coverage'].map(kind => ({kind,
+    props: {flu_code: 'VA', coverage_kind: 'covered', coverage_status: 'substantial'},
     style: {color: '#112233', fillColor: '#112233', opacity: 0, fillOpacity: 0}}));
+  initial.forEach(item => {item.style = {...item.style, ...story.initial(item)};});
   const timeline = compile(initial, story.groups);
-  assert.deepEqual(timeline.sample(timeline.stops[2]).map(i => i.style.opacity), [0, 0.9]);
-  assert.deepEqual(timeline.sample(timeline.stops[1]).map(i => i.style.opacity), [1, 0]);
-  assert.deepEqual(timeline.sample(0).map(i => i.style.opacity), [0, 0]);
+  // Housing Growth Area outlines show only in the opening chapter; Tier 1B appears
+  // only through green coverage pieces, with no separate outline layer.
+  assert.deepEqual(timeline.sample(timeline.stops[3]).map(i => i.style.opacity), [0, 0, 0, 0, 0.95]);
+  assert.deepEqual(timeline.sample(timeline.stops[2]).map(i => i.style.opacity), [0, 0, 0, 0, 0.95]);
+  assert.deepEqual(timeline.sample(timeline.stops[1]).map(i => i.style.opacity), [0, 0, 0.75, 0, 0]);
+  assert.deepEqual(timeline.sample(0).map(i => i.style.opacity), [0, 0, 0.95, 1, 0]);
+  // Interim exemption areas belong to the act181 story and are never mounted here.
+  assert.deepEqual(story.overlays, ['housing-category', 'housing-block', 'housing-coverage']);
   let rejected = false;
   try {MapStories.create(context, 'act181');} catch {rejected = true;}
   assert.equal(rejected, true);
+});
+test('housing story separates partial coverage, missing data, and no-growth municipalities', () => {
+  const colors = {positive: '#112233', negative: '#445566', unknown: '#778899', partial: '#cf9a35',
+    gain: '#399b55', neutral: '#e2e6e3', villageArea: '#bedde4', villageCenter: '#7bb6c5',
+    plannedGrowth: '#38889f', downtown: '#15566b'};
+  const statuses = ['all', 'some', 'none', 'no_housing', 'unknown'];
+  const municipalities = statuses.map(status => ({geoid: status, status, block_count: status === 'no_housing' ? 0 : 3}));
+  const story = MapStories.create({housingData: {municipalities}, colors});
+  const initial = municipalities.map(props => ({kind: 'town', props,
+    style: {fillColor: '#000000', fillOpacity: 0}}));
+  const timeline = compile(initial, story.groups);
+  assert.deepEqual(timeline.sample(timeline.stops[3]).map(i => i.style.fillColor),
+    [colors.gain, colors.partial, colors.negative, colors.neutral, colors.unknown]);
+  assert.deepEqual(story.steps[1].stats[0].select({geoid: 'unknown'}), true);
+  assert.deepEqual(story.steps[1].stats[0].select({geoid: 'no_housing'}), false);
+  // Opening and overlap chapters count Housing Growth Areas, not municipalities.
+  assert.deepEqual(story.steps.map(s => s.statsOf || 'municipalities'), ['areas', 'municipalities', 'areas', 'municipalities']);
+  const areas = ['substantial', 'partial', 'none', 'none'].map(coverage_status => ({coverage_status}));
+  assert.deepEqual(story.steps[0].stats.map(s => areas.filter(s.select).length), [4]);
+  assert.deepEqual(story.steps[2].stats.map(s => areas.filter(s.select).length), [1, 1, 2]);
+  assert.deepEqual(story.steps[3].stats.map(s => municipalities.filter(s.select).length), [1, 1, 1, 1, 1]);
+  assert.deepEqual(story.steps[3].stats.map(s => s.color),
+    [colors.gain, colors.partial, colors.negative, colors.neutral, colors.unknown]);
+  // Legend swatches and municipal hover appear only where municipalities are filled.
+  assert.deepEqual(story.steps.map(s => !!s.municipalFill), [false, true, false, true]);
+  assert.deepEqual(story.steps.map(s => s.stats.some(stat => stat.color)), [false, true, false, true]);
+  const blocks = ['covered', 'uncovered', 'unknown'].map(coverage_kind => ({kind: 'housing-coverage',
+    props: {coverage_kind, coverage_status: 'partial'}, style: {color: '#000000', fillColor: '#000000', opacity: 0, fillOpacity: 0}}));
+  const blockTimeline = compile(blocks, story.groups);
+  assert.deepEqual(blockTimeline.sample(blockTimeline.stops[2]).map(i => i.style.fillColor),
+    [colors.gain, colors.negative, colors.unknown]);
+  assert.deepEqual(blockTimeline.sample(blockTimeline.stops[2]).map(i => i.style.color),
+    [colors.gain, colors.negative, colors.unknown]);
+  assert.equal(story.steps[2].areaKey.some(([color]) => color === colors.partial), false);
+  assert.equal(story.steps[3].areaKey.some(([color]) => color === colors.partial), false);
+  assert.deepEqual(blockTimeline.sample(0).map(i => i.style.opacity), [0, 0, 0]);
+});
+test('opening housing layer preserves all four ordered category shades', () => {
+  const colors = {villageArea: '#bedde4', villageCenter: '#7bb6c5', plannedGrowth: '#38889f', downtown: '#15566b'};
+  const story = MapStories.create({housingData: {municipalities: []}, colors});
+  assert.deepEqual(['VA', 'VC', 'PGA', 'DC'].map(flu_code => story.initial({kind: 'housing-category', props: {flu_code}}).fillColor),
+    [colors.villageArea, colors.villageCenter, colors.plannedGrowth, colors.downtown]);
+  assert.deepEqual(story.initial({kind: 'area', props: {}}), {});
+});
+test('binary growth chapter uses included block counts before revealing Tier coverage', () => {
+  const colors = {positive: '#112233', negative: '#445566', unknown: '#778899', partial: '#cf9a35',
+    gain: '#399b55', neutral: '#e2e6e3', villageArea: '#bedde4', villageCenter: '#7bb6c5',
+    plannedGrowth: '#38889f', downtown: '#15566b'};
+  const municipalities = [{geoid: 'with', block_count: 3, status: 'none'},
+    {geoid: 'without', block_count: 0, status: 'no_housing'}];
+  const story = MapStories.create({housingData: {municipalities}, colors});
+  const initial = municipalities.map(props => ({kind: 'town', props,
+    style: {fillColor: '#000000', fillOpacity: 0}}));
+  const timeline = compile(initial, story.groups);
+  assert.deepEqual(timeline.sample(timeline.stops[1]).map(i => i.style.fillColor), [colors.gain, colors.negative]);
+  assert.deepEqual(story.steps[1].stats.map(s => s.color), [colors.gain, colors.negative]);
+  assert.deepEqual(story.steps[1].stats.map(s => municipalities.filter(s.select).length), [1, 1]);
+  assert.deepEqual(story.steps.map(s => s.municipalityView), ['growth', 'growth', 'coverage', 'coverage']);
+  assert.deepEqual(timeline.sample(timeline.stops[2]).map(i => i.style.fillOpacity), [0, 0]);
+  assert.deepEqual(timeline.sample(timeline.stops[3]).map(i => i.style.fillColor), [colors.negative, colors.neutral]);
+  assert.deepEqual(timeline.sample(timeline.stops[1]).map(i => i.style.fillColor), [colors.gain, colors.negative]);
+  assert.deepEqual(story.initial({kind: 'housing-context', props: {flu_code: 'PGA'}}), {});
+});
+test('unknown legend entries follow actual data and excluded audit fragments never become legend entries', () => {
+  const colors = {positive: '#112233', negative: '#445566', unknown: '#778899', partial: '#cf9a35',
+    gain: '#399b55', neutral: '#e2e6e3'};
+  const known = {municipalities: [{geoid: 'known', block_count: 1, status: 'all'}],
+    coverage_parts: {features: [{properties: {coverage_kind: 'covered'}}]}, context_fragments: {features: [{}]}};
+  const story = MapStories.create({housingData: known, colors});
+  assert.equal(story.steps[2].areaKey.some(([,label]) => label === 'Cannot assess'), false);
+  assert.equal(story.steps[3].stats.some(({label}) => label === 'Cannot assess'), false);
+  assert.equal(story.steps.some(s => [...s.areaKey.map(([, label]) => label), ...s.stats.map(stat => stat.label)].some(label => /context|excluded/i.test(label))), false);
+  const future = MapStories.create({housingData: {municipalities: [{geoid: 'unknown', status: 'unknown'}],
+    coverage_parts: {features: [{properties: {coverage_kind: 'unknown'}}]}}, colors});
+  assert.equal(future.steps[2].areaKey.some(([,label]) => label === 'Cannot assess'), true);
+  assert.equal(future.steps[3].stats.some(({label}) => label === 'Cannot assess'), true);
+  assert.equal(story.steps[2].stats.some(({label}) => label === 'Cannot assess'), false);
+  const unknownBlocks = MapStories.create({housingData: {...known, blocks: {features: [{properties: {coverage_status: 'unknown'}}]}}, colors});
+  assert.equal(unknownBlocks.steps[2].stats.some(({label}) => label === 'Cannot assess'), true);
+  assert.equal(future.steps[1].stats[1].select({geoid: 'unknown'}), false);
+  assert.equal(future.steps[1].stats[2].select({geoid: 'unknown'}), true);
+  assert.equal(story.steps[1].stats.length, 2);
+  const unknownTown = {kind: 'town', props: {geoid: 'unknown'}, style: {fillColor: '#000000', fillOpacity: 0}};
+  const timeline = compile([unknownTown], future.groups);
+  assert.equal(timeline.sample(timeline.stops[1])[0].style.fillColor, colors.unknown);
 });
 test('progress follows the rendered map across unequal chapter lengths and reversals', () => {
   const chapter = position => MapStoryAnimation.chapterAt(position, [0, 4, 6.5]);

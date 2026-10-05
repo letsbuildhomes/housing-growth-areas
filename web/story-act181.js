@@ -76,6 +76,6 @@ window.MapStories.register({
           ...phase('area', remainingExempt, {color: bad, fillColor: bad})(item)}),
       ],
     ];
-    return {steps, groups};
+    return {steps, groups, overlays: ['area', 'tier']};
   },
 });

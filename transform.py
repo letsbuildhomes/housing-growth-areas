@@ -390,13 +390,14 @@ def tier_inputs(con):
     return stamp, rows, towns
 
 
-def derive_tier_municipal(con):
+def derive_tier_municipal(con, input_data=None):
     """Spatial assignment in meters. Temporary tables never modify ingest data."""
-    stamp, rows, towns = tier_inputs(con)
-    band = config.TIER_RULES['boundary_band_m']
-    radius = config.TIER_RULES['closing_radius_m']
-    minimum = config.TIER_RULES['minimum_part_m2']
-    crs = config.TIER_RULES['crs']
+    stamp, rows, towns = input_data if input_data is not None else tier_inputs(con)
+    rules = stamp['rules']
+    band = rules['boundary_band_m']
+    radius = rules['closing_radius_m']
+    minimum = rules['minimum_part_m2']
+    crs = rules['crs']
     con.execute('CREATE OR REPLACE TEMP TABLE tier_towns (geoid VARCHAR, name VARCHAR, g GEOMETRY, core GEOMETRY)')
     for geoid,name,geo in towns:
         con.execute('''INSERT INTO tier_towns SELECT ?,?,g,ST_Buffer(g,?) FROM
@@ -416,7 +417,10 @@ def derive_tier_municipal(con):
         if not con.execute('SELECT ST_IsValid(g) FROM source_geom').fetchone()[0]:
             audit['repairs'].append({'source_index':index,'operation':'source validity repair'})
         parts = con.execute('''SELECT ST_AsWKB(part.geom) FROM source_geom,
-            unnest(ST_Dump(ST_CollectionExtract(ST_MakeValid(g),3))) parts(part)''').fetchall()
+            unnest(ST_Dump(ST_CollectionExtract(ST_MakeValid(g),3))) parts(part)
+            WHERE ST_Area(part.geom)>0''').fetchall()
+        if not parts:
+            audit['unassigned_parts'].append({'source_index':index,'reason':'no polygon geometry after repair'})
         for part_index,(wkb,) in enumerate(parts):
             con.execute('CREATE OR REPLACE TEMP TABLE part AS SELECT ST_GeomFromWKB(?) g',[wkb])
             area = con.execute('SELECT ST_Area(g) FROM part').fetchone()[0]
@@ -498,6 +502,381 @@ def prepare_tier(db_path=DB_PATH, output=None):
     print(f'Prepared {len(document["areas"]["features"])} municipal Tier 1B stage records → {output}')
 
 
+def housing_inputs(con):
+    """Fingerprint every stage, including non-housing FLU and absent geometry."""
+    rows = con.execute('''SELECT run_id,feature_id,layer_id,source_id,source_oid,rpc,
+        map_stage,submission_version,lurb_status,ST_AsGeoJSON(geom),flu_code,date_lurb
+        FROM map_features WHERE kind='flu'
+        AND map_stage IN ('pre_application','application','approved')
+        ORDER BY rpc,map_stage,layer_id,feature_id''').fetchall()
+    tier_stamp, tier_rows, towns = tier_inputs(con)
+    rpc_rows = con.execute('''SELECT rpc,ST_AsGeoJSON(geom) FROM rpc_boundaries
+        ORDER BY rpc,feature_id''').fetchall()
+    dates = con.execute("SELECT feature_id,date_lurb FROM map_features WHERE kind='tier' ORDER BY feature_id,date_lurb").fetchall()
+    stamp = {'schema_version': 1, 'snapshot_id': tier_stamp['snapshot_id'],
+             'lineage_version': 1,
+             'rules': config.HOUSING_RULES, 'tier_processing_rules': config.TIER_RULES,
+             'inputs_sha256': hashlib.sha256(json.dumps([rows,tier_rows,towns,rpc_rows,dates]).encode()).hexdigest()}
+    return stamp, rows, towns
+
+
+def selected_map_stages(rows):
+    rank = {'pre_application': 1, 'application': 2, 'approved': 3}
+    selected = {}
+    for row in rows:
+        rpc, stage = row[5:7]
+        if rank[stage] > rank.get(selected.get(rpc), 0):
+            selected[rpc] = stage
+    return selected
+
+
+def housing_coverage(area, covered, rules=None):
+    """Allow 1% discrepancy, or up to 5% when also below the acreage limit."""
+    rules = rules or config.HOUSING_RULES
+    tolerance = max(area * rules.get('coverage_near_complete_fraction',0),
+                    min(area * rules['coverage_tolerance_fraction'], rules['coverage_tolerance_m2']))
+    if area <= 0:
+        return 'unknown'
+    if area - covered <= tolerance:
+        return 'substantial'
+    if covered <= tolerance:
+        return 'none'
+    return 'partial'
+
+
+def housing_boundary_context(con, audit):
+    """Retain polygons excluded by the existing assignment rule as visual context.
+
+    Failing municipality interior qualification excludes a valid component from
+    analysis; it is not a data failure or a claim about its intended ownership.
+    Missing/nonpolygon geometry remains a preparation failure.
+    """
+    excluded, features = set(), []
+    for item in audit['unassigned_parts']:
+        if item.get('reason') != 'no qualifying municipality' or 'geometry_wkb_hex' not in item:
+            continue
+        wkb = bytes.fromhex(item['geometry_wkb_hex'])
+        valid,area,geometry = con.execute("""SELECT ST_IsValid(g),ST_Area(g),ST_AsGeoJSON(
+            ST_Transform(g,?,'EPSG:4326',always_xy:=true)) FROM
+            (SELECT ST_GeomFromWKB(?) g)""",[config.HOUSING_RULES['crs'],wkb]).fetchone()
+        if not valid or area <= 0:
+            continue
+        source = audit['sources'][item['source_index']]
+        digest = hashlib.sha256(wkb).hexdigest()
+        fid = f'{source["feature_id"]}:context:{digest[:16]}'
+        features.append({'type':'Feature','id':fid,'geometry':json.loads(geometry),
+            'properties':dict(feature_id=fid,rpc=source['rpc'],map_stage=source['map_stage'],
+                flu_code=source['flu_code'],source_indices=[item['source_index']],
+                source_part=item['part'],geometry_sha256=digest,area_m2=area,
+                context_reason='outside_municipality_assignment',analytical_included=False)})
+        item['analytical_exclusion'] = 'outside_municipality_assignment'
+        item['geometry_sha256'] = digest
+        excluded.add((item['source_index'],item['part']))
+    return features, excluded
+
+
+def split_housing_block(con, wkb, tier_geo, crs):
+    """Partition one block in meters, absorbing hairline boundary slivers.
+
+    Growth and Tier maps trace nearly identical edges, so an exact overlay
+    leaves thousands of hairline pieces. Each piece narrower than twice
+    `coverage_sliver_m` joins the kind of its largest wider neighbor (or keeps
+    its own kind without one). Pieces come from one overlay and share exact
+    edges, so the merged kinds still tile the block without subtraction residue.
+    Returns the exact covered area and (kind, area_m2, WGS84 GeoJSON) portions.
+    """
+    radius = config.HOUSING_RULES['coverage_sliver_m']
+    con.execute('''CREATE OR REPLACE TEMP TABLE block_coverage AS
+        WITH input AS (SELECT ST_GeomFromWKB(?) g,COALESCE(
+                ST_Transform(ST_GeomFromGeoJSON(?),'EPSG:4326',?,always_xy:=true),
+                ST_GeomFromText('POLYGON EMPTY')) t),
+            overlay AS (SELECT ST_CollectionExtract(ST_Intersection(g,t),3) covered,
+                ST_CollectionExtract(ST_Difference(g,t),3) uncovered FROM input),
+            pieces AS (SELECT row_number() OVER () id,exact_kind,piece.geom g,ST_Area(piece.geom) area,
+                ST_IsEmpty(ST_Buffer(piece.geom,-?)) thin FROM
+                (SELECT 'covered' exact_kind,covered shape FROM overlay
+                 UNION ALL SELECT 'uncovered',uncovered FROM overlay),unnest(ST_Dump(shape)) parts(piece)
+                WHERE ST_Area(piece.geom)>0),
+            absorbed AS (SELECT p.id,q.exact_kind kind FROM pieces p JOIN pieces q
+                ON p.thin AND NOT q.thin AND ST_Intersects(p.g,q.g)
+                QUALIFY row_number() OVER (PARTITION BY p.id ORDER BY q.area DESC)=1)
+        SELECT exact_kind,COALESCE(a.kind,exact_kind) kind,g FROM pieces LEFT JOIN absorbed a USING(id)''',
+        [wkb,tier_geo,crs,radius])
+    exact_m2 = con.execute('''SELECT COALESCE(sum(ST_Area(g)),0) FROM block_coverage
+        WHERE exact_kind='covered' ''').fetchone()[0]
+    portions = []
+    # Transformed rings can touch themselves at float precision; repair is display-only.
+    rows = con.execute('''SELECT kind,ST_Area(g),ST_IsValid(g),ST_IsValid(w),ST_AsGeoJSON(w) FROM
+        (SELECT kind,g,ST_CollectionExtract(ST_MakeValid(ST_Transform(g,?,'EPSG:4326',always_xy:=true)),3) w FROM
+            (SELECT kind,ST_CollectionExtract(ST_Union_Agg(g),3) g FROM block_coverage GROUP BY kind))
+        ORDER BY kind''',[crs]).fetchall()
+    for kind,area,valid,display_valid,geo in rows:
+        if not valid or not display_valid:
+            raise ValueError(f'Invalid derived housing coverage portion: {kind}')
+        portions.append((kind,area,json.loads(geo)))
+    return exact_m2,portions
+
+
+def derive_housing_growth(con):
+    stamp, all_rows, towns = housing_inputs(con)
+    selected = selected_map_stages(all_rows)
+    rows = [row for row in all_rows if row[6] == selected[row[5]]
+            and row[10] in config.HOUSING_RULES['categories']]
+    # Reuse precisely the municipal Tier assignment, without changing interim memberships.
+    municipal = derive_tier_municipal(con, (stamp, [row[:10] for row in rows], towns))
+    con.execute('CREATE OR REPLACE TEMP TABLE housing_assigned AS SELECT * FROM assigned')
+    sources = municipal['audit']['sources']
+    for source, row in zip(sources, rows):
+        source.update(flu_code=row[10], date_lurb=row[11])
+    con.execute('CREATE OR REPLACE TEMP TABLE housing_source (source_index INTEGER,flu_code VARCHAR)')
+    for i, row in enumerate(rows):
+        con.execute('INSERT INTO housing_source VALUES (?,?)', [i,row[10]])
+    context_features,context_excluded = housing_boundary_context(con,municipal['audit'])
+    crs = config.HOUSING_RULES['crs']
+    categories = []
+    category_rows = con.execute('''SELECT a.geoid,t.name,a.rpc,a.stage,s.flu_code,
+        list(DISTINCT a.source_index ORDER BY a.source_index),ST_AsGeoJSON(
+        ST_Transform(ST_Union_Agg(a.g),?,'EPSG:4326',always_xy:=true))
+        FROM housing_assigned a JOIN tier_towns t USING(geoid)
+        JOIN housing_source s USING(source_index)
+        GROUP BY a.geoid,t.name,a.rpc,a.stage,s.flu_code
+        ORDER BY a.rpc,t.name,s.flu_code''',[crs]).fetchall()
+    for geoid,name,rpc,stage,code,indices,geo in category_rows:
+        categories.append({'type':'Feature','id':f'{rpc}:{geoid}:{stage}:{code}',
+            'properties':dict(geoid=geoid,municipality=name,rpc=rpc,map_stage=stage,
+                flu_code=code,source_indices=indices), 'geometry':json.loads(geo)})
+    tier = derive_tier_municipal(con)
+    tier_selected = tier['selected_stages']
+    tier_lookup = {(f['properties']['rpc'],f['properties']['geoid']): f for f in tier['areas']['features']
+                   if f['properties']['map_stage'] == tier_selected[f['properties']['rpc']]}
+    def regional_unions(features):
+        con.execute('CREATE OR REPLACE TEMP TABLE regional_shapes (rpc VARCHAR,g GEOMETRY)')
+        for feature in features:
+            con.execute('INSERT INTO regional_shapes SELECT ?,ST_GeomFromGeoJSON(?)',
+                        [feature['properties']['rpc'],json.dumps(feature['geometry'])])
+        return dict(con.execute('SELECT rpc,ST_AsGeoJSON(ST_Union_Agg(g)) FROM regional_shapes GROUP BY rpc').fetchall())
+    housing_regions = regional_unions(municipal['areas']['features'])
+    context_regions = regional_unions(context_features)
+    context_masks = {}
+    for rpc,geo in context_regions.items():
+        # An excluded source component must never erase accepted housing acreage.
+        mask = con.execute('''SELECT ST_AsWKB(ST_CollectionExtract(ST_Difference(
+            ST_Transform(ST_GeomFromGeoJSON(?),'EPSG:4326',?,always_xy:=true),
+            COALESCE(ST_Transform(ST_GeomFromGeoJSON(?),'EPSG:4326',?,always_xy:=true),
+            ST_GeomFromText('POLYGON EMPTY'))),3))''',
+            [geo,crs,housing_regions.get(rpc),crs]).fetchone()[0]
+        context_masks[rpc] = mask
+    def clip_tier_geometry(geo,rpc):
+        result = con.execute('''SELECT ST_Area(g),ST_AsGeoJSON(ST_Transform(g,?,'EPSG:4326',always_xy:=true))
+            FROM (SELECT ST_CollectionExtract(ST_Difference(
+                ST_Transform(ST_GeomFromGeoJSON(?),'EPSG:4326',?,always_xy:=true),
+                COALESCE(ST_GeomFromWKB(?),ST_GeomFromText('POLYGON EMPTY'))),3) g)''',
+            [crs,geo,crs,context_masks.get(rpc)]).fetchone()
+        return result
+    tier_regions = {}
+    for rpc,geo in regional_unions(tier_lookup.values()).items():
+        area,clipped = clip_tier_geometry(geo,rpc)
+        if area>0:
+            tier_regions[rpc] = clipped
+    flu_failures = [item for item in municipal['audit']['unassigned_parts']
+                   if (item.get('source_index'),item.get('part')) not in context_excluded]
+    incomplete_flu = {sources[x['source_index']]['rpc'] for x in flu_failures}
+    # Unknown FLU codes and missing geometry in any selected FLU can hide a housing block.
+    incomplete_flu.update(row[5] for row in all_rows if row[6] == selected[row[5]]
+                          and (row[10] is None
+                               or (row[10] in config.HOUSING_RULES['categories'] and row[9] is None)))
+    tier_sources = tier['audit']['sources']
+    tier_dates = dict(con.execute("SELECT feature_id,max(date_lurb) FROM map_features WHERE kind='tier' GROUP BY feature_id").fetchall())
+    for source in tier_sources:
+        source['date_lurb'] = tier_dates.get(source['feature_id'])
+    selected_tier_failures = [x for x in tier['audit']['unassigned_parts']
+        if tier_sources[x['source_index']]['map_stage'] == tier_selected[tier_sources[x['source_index']]['rpc']]]
+    tier_context_adjustments,remaining_tier_failures = [],[]
+    for item in selected_tier_failures:
+        if item.get('reason')!='no qualifying municipality' or 'geometry_wkb_hex' not in item:
+            remaining_tier_failures.append(item)
+            continue
+        wkb = bytes.fromhex(item['geometry_wkb_hex'])
+        valid,area = con.execute('SELECT ST_IsValid(g),ST_Area(g) FROM (SELECT ST_GeomFromWKB(?) g)',[wkb]).fetchone()
+        if not valid or area<=0:
+            remaining_tier_failures.append(item)
+            continue
+        tier_context_adjustments.append(dict(tier_source_indices=[item['source_index']],source_part=item['part'],
+            geometry_sha256=hashlib.sha256(wkb).hexdigest(),original_area_m2=area,
+            excluded_m2=area,residual_area_m2=0,
+            reason='outside_municipality_assignment'))
+    incomplete_tier = {tier_sources[x['source_index']]['rpc'] for x in remaining_tier_failures}
+    def comparison(rpc,geoid):
+        if rpc not in selected:
+            return 'missing_flu'
+        if rpc in incomplete_flu:
+            return 'incomplete_flu'
+        if rpc not in tier_selected:
+            return 'missing_tier'
+        if rpc in incomplete_tier:
+            return 'incomplete_tier'
+        if selected[rpc] != tier_selected[rpc]:
+            return 'stage_mismatch'
+        return 'comparable'
+    blocks,coverage_parts = [],[]
+    housing_lookup = {}
+    for feature in municipal['areas']['features']:
+        props = feature['properties']
+        rpc,geoid = props['rpc'],props['geoid']
+        housing_lookup[(rpc,geoid)] = feature
+        # Regional unions prevent different municipal ownership of protrusions from
+        # manufacturing uncovered borders. Both inputs still follow assignment rules.
+        tier_geo = tier_regions.get(rpc)
+        con.execute('''CREATE OR REPLACE TEMP TABLE block_input AS SELECT
+            ST_Transform(ST_GeomFromGeoJSON(?),'EPSG:4326',?,always_xy:=true) g''',
+            [json.dumps(feature['geometry']),crs])
+        # Group across narrow road gaps, retaining the actual unbuffered area.
+        # A group can therefore remain a MultiPolygon; no new housing land is added.
+        parts = con.execute('''SELECT ST_AsWKB(shape),ST_Area(shape),ST_AsGeoJSON(
+            ST_Transform(shape,?,'EPSG:4326',always_xy:=true)) FROM
+            (SELECT ST_CollectionExtract(ST_Intersection(g,piece.geom),3) shape
+             FROM block_input,unnest(ST_Dump(ST_Buffer(g,?))) pieces(piece))
+            ORDER BY ST_XMin(shape),ST_YMin(shape),ST_Area(shape)''',
+            [crs,config.HOUSING_RULES['grouping_gap_m']/2]).fetchall()
+        for index,(wkb,area,geo) in enumerate(parts):
+            exact_covered,portions = split_housing_block(con,wkb,tier_geo,crs)
+            covered = sum(area for kind,area,_ in portions if kind=='covered')
+            covered = max(0,min(area,covered))
+            indices = [r[0] for r in con.execute('''SELECT DISTINCT source_index FROM housing_assigned
+                WHERE rpc=? AND geoid=? AND ST_Area(ST_Intersection(g,ST_GeomFromWKB(?)))>0
+                ORDER BY source_index''',[rpc,geoid,wkb]).fetchall()]
+            tier_indices = [r[0] for r in con.execute('''SELECT DISTINCT source_index FROM assigned
+                WHERE rpc=? AND stage=? AND ST_Area(ST_Intersection(g,ST_GeomFromWKB(?)))>0
+                ORDER BY source_index''',[rpc,tier_selected.get(rpc),wkb]).fetchall()]
+            state = comparison(rpc,geoid)
+            block_id = f'{rpc}:{geoid}:{props["map_stage"]}:{index}'
+            block_props = dict(block_id=block_id,geoid=geoid,municipality=props['municipality'],
+                    rpc=rpc,map_stage=props['map_stage'],tier_map_stage=tier_selected.get(rpc),
+                    source_indices=indices,tier_source_indices=tier_indices,
+                    area_m2=area,covered_m2=covered,exact_covered_m2=exact_covered,
+                    coverage_fraction=covered/area,
+                    comparison_status=state,coverage_status=housing_coverage(area,covered) if state=='comparable' else 'unknown')
+            blocks.append({'type':'Feature','id':block_id,'geometry':json.loads(geo),'properties':block_props})
+            display_portions = portions if state=='comparable' else [('unknown',area,json.loads(geo))]
+            for kind,portion_area,portion_geo in display_portions:
+                coverage_parts.append({'type':'Feature','id':f'{block_id}:{kind}',
+                    'geometry':portion_geo,'properties':{**block_props,'coverage_kind':kind,
+                                                        'portion_area_m2':portion_area}})
+    summaries = []
+    for geoid,name,_ in towns:
+        matches = con.execute('''SELECT DISTINCT r.rpc FROM municipal_boundaries t JOIN rpc_boundaries r
+            ON ST_Intersects(ST_PointOnSurface(t.geom),r.geom) WHERE t.geoid=? ORDER BY r.rpc''',[geoid]).fetchall()
+        if len(matches)!=1:
+            raise ValueError(f'Ambiguous RPC membership for housing summary: {name}')
+        rpc = matches[0][0]
+        local = [b['properties'] for b in blocks if b['properties']['geoid']==geoid]
+        counts = {status:sum(b['coverage_status']==status for b in local)
+                  for status in ('substantial','partial','none','unknown')}
+        area = sum(b['area_m2'] for b in local)
+        covered = sum(b['covered_m2'] for b in local)
+        state = comparison(rpc,geoid)
+        flu_complete = rpc in selected and rpc not in incomplete_flu
+        status = ('no_housing' if not local and flu_complete else
+                  'unknown' if state!='comparable' or counts['unknown'] else
+                  'all' if counts['substantial']==len(local) else
+                  'none' if counts['none']==len(local) else 'some')
+        summaries.append(dict(geoid=geoid,municipality=name,rpc=rpc,status=status,
+            block_count=len(local),substantial_count=counts['substantial'],partial_count=counts['partial'],
+            none_count=counts['none'],unknown_count=counts['unknown'],area_m2=area,covered_m2=covered,
+            coverage_fraction=covered/area if area else None,comparison_status=state,
+            map_stage=selected.get(rpc),tier_map_stage=tier_selected.get(rpc)))
+    outside, diagnostics = [], []
+    for (rpc,geoid),feature in sorted(tier_lookup.items()):
+        display_area = feature['properties']['area_m2']
+        area,tier_geo = clip_tier_geometry(json.dumps(feature['geometry']),rpc)
+        housing_geo = housing_regions.get(rpc)
+        result = con.execute('''SELECT ST_Area(g),ST_AsGeoJSON(ST_Transform(g,?,'EPSG:4326',always_xy:=true))
+            FROM (SELECT ST_CollectionExtract(ST_Difference(
+                ST_Transform(ST_GeomFromGeoJSON(?),'EPSG:4326',?,always_xy:=true),
+                COALESCE(ST_Transform(ST_GeomFromGeoJSON(?),'EPSG:4326',?,always_xy:=true),
+                ST_GeomFromText('POLYGON EMPTY'))),3) g)''', [crs,tier_geo,crs,housing_geo,crs]).fetchone()
+        meaningful = result[0] > max(area*config.HOUSING_RULES['reverse_near_complete_fraction'],
+                                    min(area*config.HOUSING_RULES['reverse_tolerance_fraction'],
+                                        config.HOUSING_RULES['reverse_tolerance_m2']))
+        props = dict(geoid=geoid,municipality=feature['properties']['municipality'],rpc=rpc,
+            map_stage=tier_selected[rpc],flu_map_stage=selected.get(rpc),tier_area_m2=area,
+            tier_source_indices=feature['properties']['source_indices'],
+            display_tier_area_m2=display_area,analytical_excluded_m2=max(0,display_area-area),
+            outside_m2=result[0],outside_fraction=result[0]/area if area else None,meaningful=meaningful,
+            comparison_status=comparison(rpc,geoid))
+        diagnostics.append(props)
+        if meaningful:
+            outside.append({'type':'Feature','id':f'{rpc}:{geoid}:outside','properties':props,
+                            'geometry':json.loads(result[1])})
+    sensitivity = []
+    for near_complete,fraction,absolute in ((0,0.01,250),(0.01,0.05,1000),(0.02,0.1,2500)):
+        settings = {**config.HOUSING_RULES,'coverage_tolerance_fraction':fraction,
+                    'coverage_tolerance_m2':absolute,'coverage_near_complete_fraction':near_complete}
+        comparable = [b['properties'] for b in blocks if b['properties']['comparison_status']=='comparable']
+        counts = {s:sum(housing_coverage(b['area_m2'],b['covered_m2'],settings)==s for b in comparable)
+                  for s in ('substantial','partial','none')}
+        changed = [b['block_id'] for b in comparable
+                   if housing_coverage(b['area_m2'],b['covered_m2'],settings)!=b['coverage_status']]
+        municipal_counts = {'all':0,'some':0,'none':0}
+        changed_towns = []
+        for town in summaries:
+            if town['status'] not in municipal_counts:
+                continue
+            local = [b for b in comparable if b['geoid']==town['geoid']]
+            statuses = [housing_coverage(b['area_m2'],b['covered_m2'],settings) for b in local]
+            result = 'all' if all(s=='substantial' for s in statuses) else 'none' if all(s=='none' for s in statuses) else 'some'
+            municipal_counts[result] += 1
+            if result != town['status']:
+                changed_towns.append(town['municipality'])
+        sensitivity.append(dict(near_complete_fraction=near_complete,fraction=fraction,
+                                absolute_m2=absolute,counts=counts,changed_block_ids=changed,
+                                municipality_counts=municipal_counts,changed_municipalities=changed_towns))
+    return {**stamp,'selected_stages':selected,'tier_selected_stages':tier_selected,
+        'sources':sources,'tier_sources':tier_sources,'categories':{'type':'FeatureCollection','features':categories},
+        'context_fragments':{'type':'FeatureCollection','features':context_features},
+        'blocks':{'type':'FeatureCollection','features':blocks},'municipalities':summaries,
+        'coverage_parts':{'type':'FeatureCollection','features':coverage_parts},
+        'tier_outside':{'type':'FeatureCollection','features':outside},'reverse_diagnostics':diagnostics,
+        'sensitivity':sensitivity,'audit':municipal['audit'],
+        'boundary_context':{'basis':'existing municipality interior qualification',
+            'flu_excluded_count':len(context_features),
+            'flu_excluded_m2':sum(f['properties']['area_m2'] for f in context_features),
+            'tier_adjustments':tier_context_adjustments},
+        'uncertainty':{'incomplete_flu_rpcs':sorted(incomplete_flu),
+                       'incomplete_tier_rpcs':sorted(incomplete_tier),
+                       'incomplete_flu_municipalities':[],
+                       'incomplete_tier_municipalities':[]}}
+
+
+def load_housing_growth(con, path=config.HOUSING_PATH):
+    path = Path(path)
+    if not path.is_file():
+        raise ValueError('Missing housing growth preparation; run make prepare.')
+    document = json.loads(path.read_text())
+    stamp,_,_ = housing_inputs(con)
+    if any(document.get(k)!=v for k,v in stamp.items()):
+        raise ValueError('Stale housing growth preparation; run make prepare.')
+    return document
+
+
+def prepare_housing_growth(db_path=DB_PATH, output=None):
+    output = Path(output) if output else Path(db_path).parent/'housing-growth.json'
+    if not Path(db_path).is_file():
+        raise ValueError('Restore the saved database first')
+    with duckdb.connect(str(db_path),read_only=True) as con:
+        con.execute('LOAD spatial')
+        con.execute('BEGIN TRANSACTION')
+        stamp,_,_ = housing_inputs(con)
+        if output.is_file():
+            saved = json.loads(output.read_text())
+            if all(saved.get(k)==v for k,v in stamp.items()):
+                return
+        document = derive_housing_growth(con)
+        con.execute('COMMIT')
+    write_json(output,document)
+    print(f'Prepared {len(document["blocks"]["features"])} housing growth blocks → {output}')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     source = parser.add_mutually_exclusive_group(required=True)
@@ -510,6 +889,7 @@ def main():
         load_snapshot(args.snapshot, args.db)
     prepare(args.db, args.memberships)
     prepare_tier(args.db)
+    prepare_housing_growth(args.db)
 
 
 if __name__ == '__main__':

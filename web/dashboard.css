@@ -19,9 +19,16 @@
   --unknown: #f0f2f3;
   --map-positive: #287f89;
   --map-gain: #399b55;
+  --map-growth-outline: #1b5a34;
   --map-negative: var(--brand-coral);
   --map-unknown: #788992;
   --map-absent: #a18e78;
+  --map-partial: #cf9a35;
+  --map-neutral: #b9c3bd;
+  --map-village-area: #bedde4;
+  --map-village-center: #7bb6c5;
+  --map-planned-growth: #38889f;
+  --map-downtown: #15566b;
 }
 *{box-sizing:border-box}body{margin:0}button,input,select{font:inherit}a{color:#225784}button,a,input,select,summary,.table-scroll{outline-offset:4px}button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible,summary:focus-visible,.table-scroll:focus-visible{outline:2px solid #286eab}
 .masthead{height:72px;display:flex;align-items:center;justify-content:space-between;padding:0 4%;border-bottom:1px solid var(--line);background:#fff}.brand{font-size:18px;font-weight:750;letter-spacing:-.5px;display:flex;align-items:center;gap:10px}.brand-mark{font-size:28px;color:#2a689b}.project-label{font-size:12px;color:var(--muted)}.project-label span{margin:0 12px;color:#acb8bd}main{max-width:1536px;padding:40px 4% 20px;margin:auto}.page-heading{display:flex;align-items:flex-end;justify-content:space-between;gap:20px}.eyebrow{text-transform:uppercase;letter-spacing:1.8px;font-size:11px;font-weight:750;color:#397299;margin:0 0 12px}h1{font-size:34px;letter-spacing:-1.25px;font-weight:650;margin:0 0 12px;line-height:1.1}.intro{color:var(--muted);font-size:14px;line-height:1.6;margin:0}.capture{color:var(--muted);font-size:11px;margin:0 0 3px;white-space:nowrap}.capture strong{display:block;font-size:13px;font-weight:600;color:#243e50;margin-top:5px}
@@ -136,14 +143,17 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .story-stat strong { display: block; font-size: 34px; line-height: 1.1; font-weight: 650; letter-spacing: -1px; font-variant-numeric: tabular-nums; }
 .story-stat span { grid-column: 1 / -1; display: block; font-size: 12px; line-height: 1.4; color: #344f60; }
 .story-stat:only-child { grid-column: 1 / -1; }
-.story-stat:last-child:nth-child(3) { grid-column: 1 / -1; display: flex; align-items: center; gap: 10px; padding-top: 16px; border-top: 1px solid var(--line); }
-.story-stat:last-child:nth-child(3) strong { font-size: 26px; }
-.story-stat:last-child:nth-child(3) span { margin-top: 0; }
-.story-stat:last-child:nth-child(3) .stat-swatch { width: 24px; height: 26px; flex-shrink: 0; }
+.story-stat.plain { grid-template-columns: 1fr; }
+.story-stat:last-child:nth-child(2n+3) { grid-column: 1 / -1; display: flex; align-items: center; gap: 10px; padding-top: 16px; border-top: 1px solid var(--line); }
+.story-stat:last-child:nth-child(2n+3) strong { font-size: 26px; }
+.story-stat:last-child:nth-child(2n+3) span { margin-top: 0; }
+.story-stat:last-child:nth-child(2n+3) .stat-swatch { width: 24px; height: 26px; flex-shrink: 0; }
 .story-area-key { margin-top: 24px; }
 .story-area-key > div { display: flex; flex-wrap: wrap; gap: 10px 14px; }
 .story-area-key span { display: flex; align-items: center; gap: 6px; font-size: 11px; color: #344f60; }
 .story-area-key i { width: 12px; height: 12px; display: block; }
+.story-area-key i.key-outline { box-sizing: border-box; border: 2px solid; background: transparent; }
+.area-hover-region { font-weight: 500; color: var(--muted); }
 /* Desaturate only the basemap; data overlays keep their full color. */
 .map .leaflet-tile-pane { filter: grayscale(1); opacity: .5; }
 .rpc-line { display: inline-block; width: 18px; border-top: 2px solid var(--brand-green); }
@@ -307,3 +317,11 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 
 .map-controls .leaflet-control-zoom a { border: 0; }
 .map-controls .leaflet-control-zoom .leaflet-control-zoom-out { border-right: 1px solid #d8dacf; }
+/* Tier boundaries leave growth-block interiors available for their own hover. */
+.story-area-key i { flex-shrink: 0; }
+.map:not(.municipal-hover) .leaflet-overlay-pane path.leaflet-interactive,
+.map.municipal-hover :is(.leaflet-storyAreas-pane, .leaflet-housingGrowth-pane, .leaflet-tierWorking-pane) path.leaflet-interactive { pointer-events: none; }
+.leaflet-tooltip.area-hover { overflow-wrap: anywhere; }
+.leaflet-dragging .map path.leaflet-interactive { pointer-events: none; }
+/* Clicking or dragging can focus a polygon; it is not in the tab order, so no ring is needed. */
+.map path.leaflet-interactive:focus { outline: none; }

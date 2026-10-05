@@ -26,7 +26,7 @@ analyze: prepare
 page: out/dashboard/index.html
 
 PAGE_INPUTS = analyze.py config.py $(wildcard web/*.html web/*.css web/*.js web/assets/* web/vendor/*)
-out/dashboard/index.html: $(PAGE_INPUTS) out/dashboard/data/manifest.json out/dashboard/data/interim-areas.json out/dashboard/data/map.json out/dashboard/data/tier1b.json
+out/dashboard/index.html: $(PAGE_INPUTS) out/dashboard/data/manifest.json out/dashboard/data/interim-areas.json out/dashboard/data/map.json out/dashboard/data/tier1b.json out/dashboard/data/housing-growth.json
 	$(UV) analyze.py --page
 
 # Missing exports are an error, never an implicit fetch or database load.
@@ -39,7 +39,7 @@ extract:
 	$(UV) extract.py --workers $(WORKERS)
 
 ingest:
-	$(UV) -c "from extract import capture; from transform import load_snapshot, prepare, prepare_tier; load_snapshot(capture(workers=$(WORKERS))); prepare(); prepare_tier()"
+	$(UV) -c "from extract import capture; from transform import load_snapshot, prepare, prepare_tier, prepare_housing_growth; load_snapshot(capture(workers=$(WORKERS))); prepare(); prepare_tier(); prepare_housing_growth()"
 
 # Pass a completed capture explicitly; never guess which snapshot to restore.
 transform:

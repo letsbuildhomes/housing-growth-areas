@@ -10,7 +10,7 @@ import duckdb
 
 from analyze import publish_json_directory
 from analyze import build
-from analyze import export_all
+from analyze import export_all, export_housing_growth
 from transform import prepare, load_prepared
 import transform
 import extract
@@ -29,18 +29,23 @@ class PipelineTests(unittest.TestCase):
             con.execute("CREATE TABLE latest_ingest_run AS SELECT 'capture' AS run_id, TIMESTAMPTZ '2026-09-08 00:00:00+00' AS completed_at")
             con.execute("CREATE TABLE interim_areas AS SELECT 'area' AS feature_id, '1' AS source_oid, 'Town' AS municipality, 'Center' AS name, 'downtown_district' AS category, 'Downtown' AS exemption_type, true AS likely_eligible, NULL::BOOLEAN AS zoning_bylaws, false AS drinking_water, true AS sewer_wastewater, NULL::BOOLEAN AS adequate_soils, NULL::GEOMETRY AS geom")
             con.execute("CREATE TABLE current_features AS SELECT 'town' AS feature_id, 'Town' AS name, 'Town' AS municipality, '001' AS geoid, 'municipality_boundary' AS kind, NULL::VARCHAR AS rpc, NULL::GEOMETRY AS geom")
+            con.execute("UPDATE current_features SET geom=ST_GeomFromText('POLYGON((-73 44,-72.9 44,-72.9 44.1,-73 44.1,-73 44))')")
+            con.execute("INSERT INTO current_features VALUES ('rpc','Region',NULL,NULL,'rpc_boundary','RR',ST_GeomFromText('POLYGON((-74 43,-72 43,-72 45,-74 45,-74 43))'))")
+            con.execute("CREATE VIEW municipal_boundaries AS SELECT * FROM current_features WHERE kind='municipality_boundary'")
+            con.execute("CREATE VIEW rpc_boundaries AS SELECT * FROM current_features WHERE kind='rpc_boundary'")
             con.execute('CREATE TABLE ingest_sources (run_id VARCHAR, source_id VARCHAR, url VARCHAR)')
             con.execute('CREATE TABLE current_layers (run_id VARCHAR, source_id VARCHAR, kind VARCHAR)')
             con.execute('''CREATE TABLE map_features (run_id VARCHAR, feature_id VARCHAR,
                 source_id VARCHAR, source_oid VARCHAR, layer_id VARCHAR, rpc VARCHAR,
                 name VARCHAR, map_stage VARCHAR, submission_version VARCHAR,
                 lurb_status VARCHAR, geometry_valid BOOLEAN, geom GEOMETRY,
-                kind VARCHAR, tier_code VARCHAR)''')
+                kind VARCHAR, tier_code VARCHAR, flu_code VARCHAR, date_lurb VARCHAR)''')
             transform.create_tier1b_working_view(con)
 
     def export(self):
         prepare(self.db, self.memberships)
         transform.prepare_tier(self.db)
+        transform.prepare_housing_growth(self.db)
         export_all(self.db, self.output / 'data', self.memberships)
 
     def test_working_tier_selects_whole_rpc_stage_and_preserves_status_and_null_geometry(self):
@@ -128,6 +133,114 @@ class PipelineTests(unittest.TestCase):
                 build(self.output)
             self.assertEqual((self.output / 'index.html').read_bytes(), before)
             document[key] = original
+
+    def test_housing_export_generation_and_schema_checked_before_page_changes(self):
+        self.export()
+        build(self.output)
+        before = (self.output / 'index.html').read_bytes()
+        path = self.output / 'data/housing-growth.json'
+        document = json.loads(path.read_text())
+        original = dict(document)
+        for key in ('snapshot_id', 'captured_at', 'exported_at'):
+            document = {**original, key: 'different'}
+            path.write_text(json.dumps(document))
+            with self.assertRaisesRegex(ValueError, key):
+                build(self.output)
+            self.assertEqual((self.output / 'index.html').read_bytes(), before)
+        path.write_text(json.dumps({**original, 'schema_version': 99}))
+        with self.assertRaisesRegex(ValueError, 'housing growth export schema'):
+            build(self.output)
+        self.assertEqual((self.output / 'index.html').read_bytes(), before)
+
+    def test_housing_export_rejects_stale_preparation_without_publishing(self):
+        self.export()
+        previous = {p.name: p.read_bytes() for p in (self.output / 'data').iterdir()}
+        path = self.root / 'housing-growth.json'
+        document = json.loads(path.read_text())
+        document['inputs_sha256'] = 'stale'
+        path.write_text(json.dumps(document))
+        with self.assertRaisesRegex(ValueError, 'Stale'):
+            export_all(self.db, self.output / 'data', self.memberships)
+        self.assertEqual({p.name: p.read_bytes() for p in (self.output / 'data').iterdir()}, previous)
+
+    def test_housing_source_urls_include_tier_and_boundary_inputs(self):
+        with duckdb.connect(str(self.db)) as con:
+            con.execute("INSERT INTO ingest_sources VALUES ('capture','flu-source','https://example.test/flu'),('capture','tier-source','https://example.test/tier'),('capture','boundary-source','https://example.test/towns')")
+            con.execute("INSERT INTO current_layers VALUES ('capture','boundary-source','municipality_boundary')")
+            document = {'snapshot_id': 'capture', 'inputs_sha256': 'test', 'rules': {'version': 1},
+                        'sources': [{'source_id': 'flu-source'}],
+                        'tier_sources': [{'source_id': 'tier-source'}], 'audit': {},
+                        'categories': {'features': []}, 'blocks': {'features': []},
+                        'tier_outside': {'features': []}, 'municipalities': [], 'reverse_diagnostics': []}
+            with patch('transform.load_housing_growth', return_value=document):
+                result = export_housing_growth(con)
+            self.assertEqual(result['source_urls'], ['https://example.test/flu',
+                'https://example.test/tier', 'https://example.test/towns'])
+
+    def test_context_fragments_export_without_analytical_counts_or_property_changes(self):
+        geometry = {'type': 'Polygon', 'coordinates': [[[0,0],[1,0],[1,1],[0,0]]]}
+        properties = {'rpc': 'RR', 'flu_code': 'PGA', 'map_stage': 'approved',
+                      'source_indices': [0], 'context_reason': 'outside_municipality_assignment',
+                      'analytical_included': False, 'area_m2': 2400,
+                      'geometry_sha256': 'original-projected-geometry'}
+        fragment = {'type': 'Feature', 'id': 'fragment', 'geometry': geometry,
+                    'properties': properties}
+        document = {'snapshot_id': 'capture', 'inputs_sha256': 'test', 'rules': {'version': 2},
+                    'sources': [{'source_id': None}], 'audit': {},
+                    'categories': {'features': []}, 'blocks': {'features': []},
+                    'tier_outside': {'features': []}, 'municipalities': [],
+                    'reverse_diagnostics': [],
+                    'context_fragments': {'type': 'FeatureCollection', 'features': [fragment]}}
+        simplified = {'type': 'Polygon', 'coordinates': [[[0,0],[1,0],[0,1],[0,0]]]}
+        with duckdb.connect(str(self.db)) as con, \
+                patch('transform.load_housing_growth', return_value=document), \
+                patch('analyze.simplify_display_geometry', return_value=(simplified,
+                    {'retained_parts': [], 'feature_fallback': None})) as simplify:
+            result = export_housing_growth(con)
+        self.assertEqual(simplify.call_count, 1)
+        self.assertEqual(result['context_fragments']['features'][0]['properties'], properties)
+        self.assertEqual(result['context_fragments']['features'][0]['geometry'], simplified)
+        self.assertEqual(result['summary']['blocks'], 0)
+        self.assertEqual(result['summary']['context_fragments'], 1)
+        self.assertEqual(sum(result['summary']['municipalities'].values()), 0)
+        self.assertEqual(result['prepared_provenance']['rules_version'], 2)
+
+    def test_coverage_parts_keep_shared_boundary_and_separate_area_metadata(self):
+        geometry = {'type': 'Polygon', 'coordinates': [[[0,0],[1,0],[1,1],[0,0]]]}
+        def feature(block, kind, portion):
+            return {'type': 'Feature', 'id': f'{block}:{kind}', 'geometry': geometry,
+                    'properties': {'block_id': block, 'coverage_kind': kind,
+                                   'area_m2': 200, 'portion_area_m2': portion}}
+        parts = [feature('split', 'covered', 80), feature('split', 'uncovered', 120),
+                 feature('whole', 'covered', 200)]
+        document = {'snapshot_id': 'capture', 'inputs_sha256': 'test', 'rules': {'version': 3},
+                    'sources': [], 'audit': {}, 'categories': {'features': []},
+                    'blocks': {'features': [feature('split', 'partial', 200), feature('whole', 'substantial', 200)]},
+                    'tier_outside': {'features': []}, 'municipalities': [{'geoid': '001', 'status': 'some'},
+                                                                         {'geoid': 'missing', 'status': 'no_housing'}],
+                    'reverse_diagnostics': [], 'coverage_parts': {'type': 'FeatureCollection', 'features': parts}}
+        simplified = {'type': 'Polygon', 'coordinates': [[[0,0],[1,0],[0,1],[0,0]]]}
+        with duckdb.connect(str(self.db)) as con, \
+                patch('transform.load_housing_growth', return_value=document), \
+                patch('analyze.simplify_display_geometry', return_value=(simplified,
+                    {'retained_parts': [], 'feature_fallback': None})) as simplify:
+            con.execute('LOAD spatial')
+            # A 1 km square municipality supplies the share-of-municipality denominator.
+            con.execute('''UPDATE current_features SET geom=ST_Transform(ST_GeomFromText(
+                'POLYGON((400000 150000,401000 150000,401000 151000,400000 151000,400000 150000))'),
+                'EPSG:32145','EPSG:4326',always_xy:=true) WHERE geoid='001' ''')
+            result = export_housing_growth(con)
+        self.assertAlmostEqual(result['municipalities'][0]['municipality_area_m2'], 1_000_000, delta=1)
+        self.assertIsNone(result['municipalities'][1]['municipality_area_m2'])
+        self.assertEqual(simplify.call_count, 3)
+        self.assertEqual([f['geometry'] for f in result['coverage_parts']['features'][:2]], [geometry, geometry])
+        self.assertEqual(result['coverage_parts']['features'][2]['geometry'], simplified)
+        self.assertEqual([f['properties']['portion_area_m2'] for f in parts], [80, 120, 200])
+        self.assertTrue(all(f['properties']['area_m2']==200 for f in parts))
+        self.assertEqual(result['summary']['blocks'], 2)
+        self.assertEqual(result['summary']['coverage_parts'], 3)
+        self.assertEqual(result['summary']['municipalities']['some'], 1)
+        self.assertEqual(result['display_simplification']['retained_split_block_ids'], ['split'])
 
     def test_failed_serialization_keeps_complete_previous_exports(self):
         self.export()

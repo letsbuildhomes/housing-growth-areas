@@ -1,15 +1,16 @@
 (async () => {
   'use strict';
   const loadStatus = document.getElementById('data-status');
-  let data, mapData, tierData;
+  let data, mapData, tierData, housingData;
   try {
-    [data, mapData, tierData] = await Promise.all(['interim-areas.json', 'map.json', 'tier1b.json'].map(async name => {
+    [data, mapData, tierData, housingData] = await Promise.all(['interim-areas.json', 'map.json', 'tier1b.json', 'housing-growth.json'].map(async name => {
       const response = await fetch(`./data/${name}`);
       if (!response.ok) throw new Error(`Could not load ${name}: HTTP ${response.status}`);
       return response.json();
     }));
-    if (data.schema_version !== 1 || mapData.schema_version !== 2 || tierData.schema_version !== 3 ||
-        ['snapshot_id', 'captured_at', 'exported_at'].some(key => !data[key] || data[key] !== mapData[key] || data[key] !== tierData[key])) {
+    if (data.schema_version !== 1 || mapData.schema_version !== 2 || tierData.schema_version !== 3 || housingData.schema_version !== 1 ||
+        !Array.isArray(housingData.coverage_parts?.features) ||
+        ['snapshot_id', 'captured_at', 'exported_at'].some(key => !data[key] || [mapData, tierData, housingData].some(exportData => data[key] !== exportData[key]))) {
       throw new Error('The table and map exports do not match.');
     }
   } catch (error) {
@@ -42,6 +43,43 @@
   const themeColor = name => theme.getPropertyValue(name).trim();
   const mapColors = {positive: themeColor('--map-positive'), negative: themeColor('--map-negative'),
     unknown: themeColor('--map-unknown'), absent: themeColor('--map-absent')};
+  for (const [key, property] of Object.entries({partial: 'partial', neutral: 'neutral', villageArea: 'village-area',
+    villageCenter: 'village-center', plannedGrowth: 'planned-growth', downtown: 'downtown'})) {
+    mapColors[key] = themeColor(`--map-${property}`);
+  }
+  const housingSummaries = new Map(housingData.municipalities.map(p => [p.geoid, p]));
+  let municipalityView = 'growth';
+  // Map stage is each region's furthest submitted map; approval is its final stage.
+  const stageLabels = {pre_application: 'Pre-application', application: 'Application', approved: 'Approved'};
+  const stageLabel = value => stageLabels[value] || value || 'Not submitted';
+  const stageLine = (stage, tierStage = stage) => `<div class="area-hover-type">Submission stage: ${escapeHTML(stageLabel(stage))}${
+    tierStage !== stage ? ` (Tier 1B: ${escapeHTML(stageLabel(tierStage))})` : ''}</div>`;
+  const percent = value => value == null ? 'Unknown' : value > 0 && value < 0.001 ? '<0.1%' : `${(value * 100).toFixed(1)}%`;
+  const acreCount = value => (value / 4046.8564224).toLocaleString('en-US', {maximumFractionDigits: 1});
+  const acres = value => value == null ? 'Unknown' : `${acreCount(value)} acres`;
+  const rpcNames = {AC: 'ACRPC', BC: 'BCRC', CV: 'CVRPC', CC: 'CCRPC',
+    LC: 'LCPC', MA: 'MARC', NV: 'NVDA', NW: 'NRPC', RR: 'RRPC', TR: 'TRORC', WR: 'WRC'};
+  const rpcName = rpc => rpcNames[rpc] || rpc || 'Unknown region';
+  const placeHeading = (name, rpc) => `<strong class="area-hover-name">${escapeHTML(name)} <span class="area-hover-region">· ${escapeHTML(rpcName(rpc))}</span></strong>`;
+  const plural = (count, noun) => `${number(count)} ${noun}${count === 1 ? '' : 's'}`;
+  function municipalityTooltip(props) {
+    const p = housingSummaries.get(props.geoid);
+    const heading = placeHeading(props.name || props.municipality, props.focus_rpc || p?.rpc);
+    const stage = stageLine(housingData.selected_stages[p?.rpc], municipalityView === 'growth'
+      ? housingData.selected_stages[p?.rpc] : housingData.tier_selected_stages[p?.rpc]);
+    if (!p?.block_count) {
+      return `${heading}<div class="area-hover-type">${p?.status === 'no_housing' ? 'No Housing Growth Areas' : 'Cannot assess Housing Growth Areas'}</div>${stage}`;
+    }
+    if (municipalityView === 'growth') {
+      return `${heading}<div class="area-hover-type">${plural(p.block_count, 'Housing Growth Area')}<br>${acres(p.area_m2)}${
+        p.municipality_area_m2 ? ` · ${percent(p.area_m2 / p.municipality_area_m2)} of ${escapeHTML(props.name || props.municipality)}` : ''}</div>${stage}`;
+    }
+    // List every nonzero outcome so partly covered areas are never folded into "not covered".
+    const outcomes = [[p.substantial_count, 'covered'], [p.partial_count, 'partly covered'],
+      [p.none_count, 'not covered'], [p.unknown_count, 'cannot assess']]
+      .filter(([count]) => count).map(([count, label]) => `${number(count)} ${label}`).join(' · ');
+    return `${heading}<div class="area-hover-type">${plural(p.block_count, 'Housing Growth Area')}<br>${outcomes}<br>Tier 1B covers ${percent(p.coverage_fraction)} of ${acres(p.area_m2)}</div>${stage}`;
+  }
   const areaColor = value => value === true ? mapColors.positive : value === false ? mapColors.negative : mapColors.unknown;
   const areaDetails = new Map(data.municipalities.flatMap(group =>
     group.areas.map(area => [area.feature_id, area])));
@@ -69,9 +107,53 @@
   }
 
   function initMap() {
-    const map = L.map('map', {zoomControl: true, scrollWheelZoom: false, fadeAnimation: false,
+    const gain = themeColor('--map-gain');
+    const outline = themeColor('--map-growth-outline');
+    const {steps, groups, overlays, initial: initialStyle = () => ({})} = MapStories.create({mapData, tierData, housingData,
+      colors: {...mapColors, gain, outline}, areaColor});
+    // Leaflet's SVG renderers draw a margin beyond the view (default 10% per side);
+    // a wider margin keeps short drags from revealing undrawn polygons.
+    const renderers = new Map();
+    const rendererFor = pane => renderers.get(pane) || renderers.set(pane, L.svg({pane, padding: 0.5})).get(pane);
+    const map = L.map('map', {zoomControl: true, scrollWheelZoom: false, fadeAnimation: false, renderer: L.svg({padding: 0.5}),
       zoomSnap: 0.25, zoomDelta: 0.5, minZoom: 6, maxZoom: 19});
     map.attributionControl.setPrefix(false);
+    // Trackpad pinches zoom the map, not the page; plain wheel scrolling still drives the story.
+    // Chromium/Firefox report pinches as ctrl+wheel; Safari sends gesture events.
+    let pinchZoom = null, pinchTimer = null, gestureZoom = null;
+    const zoomAt = (event, zoom) => map.setZoomAround(map.mouseEventToContainerPoint(event),
+      Math.max(map.getMinZoom(), Math.min(map.getMaxZoom(), zoom)), {animate: false});
+    map.getContainer().addEventListener('wheel', event => {
+      if (!event.ctrlKey || gestureZoom !== null) return;
+      event.preventDefault();
+      pinchZoom = Math.max(map.getMinZoom(), Math.min(map.getMaxZoom(), (pinchZoom ?? map.getZoom()) - event.deltaY / 60));
+      zoomAt(event, pinchZoom);
+      clearTimeout(pinchTimer);
+      pinchTimer = setTimeout(() => {pinchZoom = null;}, 250);
+    }, {passive: false});
+    map.getContainer().addEventListener('gesturestart', event => {event.preventDefault(); gestureZoom = map.getZoom();});
+    map.getContainer().addEventListener('gesturechange', event => {event.preventDefault(); zoomAt(event, gestureZoom + Math.log2(event.scale));});
+    map.getContainer().addEventListener('gestureend', event => {event.preventDefault(); gestureZoom = null;});
+    // Leaflet ends a drag only on mouseup, which is lost when the button is released outside
+    // the map or window. Supply that mouseup once the pointer leaves the map's bounds or the
+    // window, the window loses focus, or the pointer returns with no button held.
+    let dragArmed = false;
+    const endDrag = event => {
+      if (!dragArmed) return;
+      dragArmed = false;
+      document.dispatchEvent(new MouseEvent('mouseup', {bubbles: true, clientX: event?.clientX ?? 0, clientY: event?.clientY ?? 0}));
+    };
+    map.getContainer().addEventListener('mousedown', event => {dragArmed = event.button === 0;});
+    document.addEventListener('mouseup', () => {dragArmed = false;});
+    // Capture runs before Leaflet's document listener, so a lost release never pans the map.
+    document.addEventListener('mousemove', event => {
+      if (!dragArmed) return;
+      const bounds = map.getContainer().getBoundingClientRect();
+      if (event.buttons === 0 || event.clientX < bounds.left || event.clientX > bounds.right ||
+          event.clientY < bounds.top || event.clientY > bounds.bottom) endDrag(event);
+    }, {capture: true, passive: true});
+    document.documentElement.addEventListener('mouseleave', endDrag);
+    window.addEventListener('blur', () => endDrag());
     const basemapStatus = document.getElementById('basemap-status');
     const basemap = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
       maxZoom: 19,
@@ -80,22 +162,27 @@
     basemap.on('tileerror', () => { basemapStatus.hidden = false; });
     basemap.on('loading', () => { basemapStatus.hidden = true; });
     basemap.addTo(map);
+    // Municipalities take hover only in stories that fill them.
+    const townHover = steps.some(step => step.municipalFill);
     const townLayer = L.geoJSON(mapData.towns, {
-      interactive: false,
+      interactive: townHover,
       style: feature => ({color: '#536c70', weight: 1, opacity: 0.85,
         fillColor: '#788992', fillOpacity: 0}),
+      onEachFeature: (feature, layer) => townHover && layer.bindTooltip(() => municipalityTooltip(feature.properties), {
+        sticky: true, opacity: 1, className: 'area-hover', direction: 'auto',
+      }),
     }).addTo(map);
     map.createPane('rpcBoundaries');
     map.getPane('rpcBoundaries').style.zIndex = 450;
     map.getPane('rpcBoundaries').style.pointerEvents = 'none';
     const rpcLayer = L.geoJSON(mapData.rpcs, {
-      pane: 'rpcBoundaries', interactive: false,
+      pane: 'rpcBoundaries', renderer: rendererFor('rpcBoundaries'), interactive: false,
       style: {color: themeColor('--brand-green'), weight: 1.6, opacity: 0.8, fill: false},
     }).addTo(map);
     map.createPane('storyAreas');
     map.getPane('storyAreas').style.zIndex = 440;
     const areaLayer = L.geoJSON(mapData.areas, {
-      pane: 'storyAreas',
+      pane: 'storyAreas', renderer: rendererFor('storyAreas'),
       style: feature => ({color: areaColor(feature.properties.likely_eligible), weight: 1.2,
         opacity: 0.9, fillColor: areaColor(feature.properties.likely_eligible), fillOpacity: 0.42}),
       onEachFeature: (feature, layer) => {
@@ -103,40 +190,137 @@
           sticky: true, opacity: 1, className: 'area-hover', direction: 'auto',
         });
       }
-    }).addTo(map);
+    });
     const {positive: good, negative: bad, unknown: muted, absent} = mapColors;
-    const gain = themeColor('--map-gain');
     const tierColor = good;
-    const tierLabels = {pre_application: 'Pre-application', application: 'Application', approved: 'Approved'};
     const tierPane = map.createPane('tierWorking');
     tierPane.style.zIndex = 430;
     const tierLayer = L.geoJSON(tierData.areas, {
-      pane: 'tierWorking',
+      pane: 'tierWorking', renderer: rendererFor('tierWorking'),
       style: {color: tierColor, fillColor: tierColor, weight: 1.2, opacity: 0, fillOpacity: 0},
       onEachFeature: (feature, layer) => {
         const p = feature.properties;
-        layer.bindTooltip(() => `<strong class="area-hover-name">Tier 1B · ${escapeHTML(tierLabels[p.map_stage])}</strong>
-          <div class="area-hover-town">${escapeHTML(p.municipality)} · ${escapeHTML(p.rpc || 'Unknown RPC')} RPC</div>
-          ${p.name ? `<div class="area-hover-type">${escapeHTML(p.name)}</div>` : ''}`, {
+        layer.bindTooltip(() => `${placeHeading(p.municipality, p.rpc)}
+          <div class="area-hover-type">Tier 1B</div>${stageLine(p.map_stage)}`, {
           sticky: true, opacity: 1, className: 'area-hover', direction: 'auto',
         });
       },
-    }).addTo(map);
+    });
+    map.createPane('housingGrowth').style.zIndex = 441;
+    // Housing Growth Area outlines sit above their category polygons and never take hover.
+    const outlinePane = map.createPane('housingOutlines');
+    outlinePane.style.zIndex = 442;
+    outlinePane.style.pointerEvents = 'none';
+    const categoryLabels = {VA: 'Village Area', VC: 'Village Center', PGA: 'Planned Growth Area', DC: 'Downtown Center'};
+    const place = p => `<div class="area-hover-town">${escapeHTML(p.municipality || 'Unknown municipality')} · ${escapeHTML(rpcName(p.rpc))}</div>`;
+    const coverageTitles = {covered: 'Covered by Tier 1B', uncovered: 'Not covered by Tier 1B', unknown: 'Tier 1B coverage unknown'};
+    // Green and red pieces share one template; only the coverage title differs.
+    function housingTooltip(kind, p) {
+      if (kind === 'housing-category') {
+        return `<strong class="area-hover-name">${escapeHTML(categoryLabels[p.flu_code])}</strong>${place(p)}${stageLine(p.map_stage)}`;
+      }
+      const share = p.area_m2 ? p.portion_area_m2 / p.area_m2 : null;
+      const size = share >= 0.9995 ? `All ${acres(p.area_m2)} of this Housing Growth Area`
+        : `${acres(p.portion_area_m2)} of this ${acreCount(p.area_m2)}-acre Housing Growth Area (${percent(share)})`;
+      return `<strong class="area-hover-name">${coverageTitles[p.coverage_kind] || coverageTitles.unknown}</strong>${place(p)}
+        <div class="area-hover-type">${size}</div>${stageLine(p.map_stage, p.tier_map_stage)}`;
+    }
+    // Split pieces under one acre are display slivers; whole small areas still show.
+    const coverageCounts = new Map();
+    housingData.coverage_parts.features.forEach(({properties: p}) => coverageCounts.set(p.block_id, (coverageCounts.get(p.block_id) || 0) + 1));
+    const coverageParts = {...housingData.coverage_parts, features: housingData.coverage_parts.features.filter(({properties: p}) =>
+      coverageCounts.get(p.block_id) === 1 || p.portion_area_m2 >= 4046.8564224)};
+    const housingLayers = [
+      ['housing-category', housingData.categories], ['housing-block', housingData.blocks], ['housing-coverage', coverageParts],
+    ].map(([kind, collection]) => ({kind, layer: L.geoJSON(collection, {
+      pane: kind === 'housing-block' ? 'housingOutlines' : 'housingGrowth', interactive: kind !== 'housing-block',
+      renderer: rendererFor(kind === 'housing-block' ? 'housingOutlines' : 'housingGrowth'),
+      style: {color: good, fillColor: good, weight: 1, opacity: 0, fillOpacity: 0},
+      onEachFeature: (feature, layer) => {
+        if (kind !== 'housing-block') {
+          layer.bindTooltip(() => housingTooltip(kind, feature.properties), {sticky: true, opacity: 1, className: 'area-hover', direction: 'auto'});
+        }
+      },
+    })}));
+    // Mount only the overlays the active story animates; unmounted layers never take hover.
+    const storyLayers = [['area', areaLayer], ['tier', tierLayer], ...housingLayers.map(({kind, layer}) => [kind, layer])]
+      .filter(([kind]) => !overlays || overlays.includes(kind));
+    storyLayers.forEach(([, layer]) => layer.addTo(map));
+    // Hover tint: the hovered polygon's fill darkens slightly; over category polygons,
+    // the whole Housing Growth Area (block) under the pointer is shaded instead.
+    const sampledStyles = new Map();
+    let tintedLayer = null;
+    const darken = color => /^#[0-9a-f]{6}$/i.test(color) ? '#' + color.slice(1).match(/../g)
+      .map(value => Math.round(parseInt(value, 16) * 0.8).toString(16).padStart(2, '0')).join('') : color;
+    const blockCollection = housingLayers.find(({kind}) => kind === 'housing-block').layer;
+    const blocksByTown = new Map();
+    blockCollection.eachLayer(layer => {
+      const key = `${layer.feature.properties.rpc}:${layer.feature.properties.geoid}`;
+      blocksByTown.set(key, [...(blocksByTown.get(key) || []), layer]);
+    });
+    const tint = (layer, style) => blockCollection.hasLayer(layer) ? {...style, fillColor: '#000000', fillOpacity: 0.15}
+      : style.fillColor ? {...style, fillColor: darken(style.fillColor)} : style;
+    const paint = layer => {
+      const style = sampledStyles.get(layer);
+      if (style) layer.setStyle(layer === tintedLayer ? tint(layer, style) : style);
+    };
+    function setTint(layer) {
+      if (layer === tintedLayer) return;
+      const previous = tintedLayer;
+      tintedLayer = layer;
+      if (previous) paint(previous);
+      if (layer) paint(layer);
+    }
+    const inRing = ([x, y], ring) => {
+      let inside = false;
+      for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+        const [xi, yi] = ring[i], [xj, yj] = ring[j];
+        if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) inside = !inside;
+      }
+      return inside;
+    };
+    const contains = ({type, coordinates}, point) => (type === 'Polygon' ? [coordinates] : type === 'MultiPolygon' ? coordinates : [])
+      .some(([outer, ...holes]) => inRing(point, outer) && !holes.some(hole => inRing(point, hole)));
+    // Category and block display shapes are simplified separately; a one-block town needs no test.
+    const blockAt = (latlng, p) => {
+      const candidates = blocksByTown.get(`${p.rpc}:${p.geoid}`) || [];
+      return candidates.find(block => contains(block.feature.geometry, [latlng.lng, latlng.lat]))
+        || (candidates.length === 1 ? candidates[0] : null);
+    };
+    function clearHover() {
+      setTint(null);
+      [areaLayer, tierLayer, townLayer, ...housingLayers.map(({layer}) => layer)]
+        .forEach(collection => collection.eachLayer(layer => layer.closeTooltip()));
+    }
+    // A drag or zoom starts from a clean slate; CSS disables polygon hover while dragging,
+    // so Leaflet never queues a tooltip to open where the drag ends.
+    map.on('dragstart zoomstart', clearHover);
+    const hoverTint = layer => layer.on({mouseover: () => setTint(layer), mouseout: () => setTint(null)});
+    if (townHover) townLayer.eachLayer(hoverTint);
+    [areaLayer, tierLayer].forEach(collection => collection.eachLayer(hoverTint));
+    housingLayers.forEach(({kind, layer: collection}) => {
+      if (kind === 'housing-coverage') collection.eachLayer(hoverTint);
+      if (kind === 'housing-category') collection.eachLayer(layer => layer.on({
+        mousemove: event => setTint(blockAt(event.latlng, layer.feature.properties)), mouseout: () => setTint(null)}));
+    });
     let focusRpc = null;
-    const countTowns = predicate => mapData.towns.features.filter(f =>
-      (!focusRpc || f.properties.focus_rpc === focusRpc) && predicate(f.properties)).length;
-    const {steps, groups} = MapStories.create({mapData, tierData,
-      colors: {...mapColors, gain}, areaColor});
+    const townRpcs = new Map(mapData.towns.features.map(f => [f.properties.geoid, f.properties.focus_rpc]));
+    // Step keys count municipalities by default, or Housing Growth Areas when a step asks.
+    const countStat = (step, predicate) => (step.statsOf === 'areas'
+      ? housingData.blocks.features.filter(f => (!focusRpc || townRpcs.get(f.properties.geoid) === focusRpc) && predicate(f.properties))
+      : mapData.towns.features.filter(f => (!focusRpc || f.properties.focus_rpc === focusRpc) && predicate(f.properties))).length;
     const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
     const initial = [];
     townLayer.eachLayer(layer => initial.push({layer, kind: 'town', props: layer.feature.properties,
       style: {fillColor: layer.feature.properties.has_designated_area ? good : absent, fillOpacity: 0}}));
-    areaLayer.eachLayer(layer => initial.push({layer, kind: 'area', props: layer.feature.properties,
-      style: {color: good, fillColor: good, opacity: 0, fillOpacity: 0}}));
-    tierLayer.eachLayer(layer => initial.push({layer, kind: 'tier',
-      props: layer.feature.properties, style: {opacity: 0, fillOpacity: 0}}));
+    storyLayers.forEach(([kind, collection]) => collection.eachLayer(layer => initial.push({layer, kind,
+      props: layer.feature.properties, style: {color: good, fillColor: good, opacity: 0, fillOpacity: 0}})));
+    initial.forEach(item => {item.style = {...item.style, ...initialStyle(item)};});
     const timeline = MapStoryAnimation.compile(initial, groups);
     let currentStep = 0, lastPosition = null;
+    // Leaflet creates path elements only once the map has a view; restyle them then
+    // so hidden polygons receive story-area-hidden and never take hover.
+    map.whenReady(() => {lastPosition = null;});
     const scrollLayout = window.matchMedia('(min-width: 1000px) and (min-height: 700px)');
     const walkthrough = document.getElementById('map-walkthrough');
     walkthrough.style.setProperty('--story-height', `${100 + (steps.length - 1) * 125}vh`);
@@ -150,11 +334,12 @@
       card.setAttribute('aria-label', step.title);
       card.innerHTML = `<div class="story-content"><div class="story-copy">
         <h3>${escapeHTML(step.title)}</h3><p class="story-description">${escapeHTML(step.description)}</p>
-        </div><div class="story-key"><h4>Municipalities · map key</h4>
-        <div class="story-stats">${step.stats.map(({select, label, color}) =>
-          `<div class="story-stat" style="--stat-color:${color}"><i class="stat-swatch" aria-hidden="true"></i><strong>${number(countTowns(select))}</strong><span>${escapeHTML(label)}</span></div>`).join('')}</div>
-        ${step.areaKey.length ? `<div class="story-area-key"><h4>Area polygons</h4><div>${step.areaKey.map(([color, label]) =>
-          `<span><i style="background:${color}" aria-hidden="true"></i>${escapeHTML(label)}</span>`).join('')}</div></div>` : ''}
+        </div><div class="story-key"><h4>${escapeHTML(step.statsTitle || 'Municipalities')}${step.stats.some(stat => stat.color) ? ' · map key' : ''}</h4>
+        <div class="story-stats">${step.stats.map(({select, label, color}) => color
+          ? `<div class="story-stat" style="--stat-color:${color}"><i class="stat-swatch" aria-hidden="true"></i><strong>${number(countStat(step, select))}</strong><span>${escapeHTML(label)}</span></div>`
+          : `<div class="story-stat plain"><strong>${number(countStat(step, select))}</strong><span>${escapeHTML(label)}</span></div>`).join('')}</div>
+        ${step.areaKey.length ? `<div class="story-area-key"><h4>Area polygons</h4><div>${step.areaKey.map(([color, label, shape]) =>
+          `<span><i class="${shape === 'outline' ? 'key-outline' : ''}" style="${shape === 'outline' ? 'border-color' : 'background'}:${color}" aria-hidden="true"></i>${escapeHTML(label)}</span>`).join('')}</div></div>` : ''}
         </div></div>`;
       originalCard.before(card);
       return card;
@@ -168,14 +353,17 @@
       const state = MapStoryAnimation.scrollState(bounded, timeline.stops);
       const index = Math.round(bounded);
       if (index !== currentStep) {
-        areaLayer.eachLayer(layer => layer.closeTooltip());
-        tierLayer.eachLayer(layer => layer.closeTooltip());
+        clearHover();
       }
       currentStep = index;
+      municipalityView = steps[index].municipalityView || 'coverage';
+      // Filled municipalities own hover; otherwise only area polygons respond.
+      map.getContainer().classList.toggle('municipal-hover', !!steps[index].municipalFill);
       const position = reducedMotion.matches ? timeline.stops[index] : (mapPosition ?? state.position);
       if (position !== lastPosition) {
         timeline.sample(position).forEach(item => {
-          item.layer.setStyle(item.style);
+          sampledStyles.set(item.layer, item.style);
+          paint(item.layer);
           if (item.kind !== 'town') {
             item.layer.getElement()?.classList.toggle('story-area-hidden', item.style.opacity === 0);
             if (item.style.opacity === 0) item.layer.closeTooltip();
@@ -316,7 +504,6 @@
     map.zoomControl.getContainer().querySelector('.leaflet-control-zoom-out').innerHTML = zoomIcon('M5 12h14');
     const bounds = townLayer.getBounds();
     let focusRegion = null;
-    const townRpcs = new Map(mapData.towns.features.map(f => [f.properties.geoid, f.properties.focus_rpc]));
     const areaRpcs = new Map();
     for (const membership of mapData.memberships) {
       if (!areaRpcs.has(membership.feature_id)) areaRpcs.set(membership.feature_id, new Set());
@@ -326,26 +513,25 @@
     townLayer.eachLayer(layer => focusLayers.push({layer, matches: rpc => layer.feature.properties.focus_rpc === rpc}));
     areaLayer.eachLayer(layer => focusLayers.push({layer, matches: rpc => areaRpcs.get(layer.feature.properties.feature_id)?.has(rpc)}));
     tierLayer.eachLayer(layer => focusLayers.push({layer, matches: rpc => townRpcs.get(layer.feature.properties.geoid) === rpc}));
+    housingLayers.forEach(({layer: collection}) => collection.eachLayer(layer => focusLayers.push({layer,
+      matches: rpc => townRpcs.get(layer.feature.properties.geoid) === rpc})));
     rpcLayer.eachLayer(layer => focusLayers.push({layer, matches: rpc => layer.feature.properties.rpc === rpc}));
     const focusControl = document.getElementById('focus-control');
     const focusToggle = document.getElementById('focus-toggle');
     const focusOptions = document.getElementById('focus-options');
     const focusClear = document.getElementById('focus-clear');
-    const rpcNames = {AC: 'ACRPC', BC: 'BCRC', CV: 'CVRPC', CC: 'CCRPC',
-      LC: 'LCPC', MA: 'MARC', NV: 'NVDA', NW: 'NRPC', RR: 'RRPC', TR: 'TRORC', WR: 'WRC'};
-    const focusName = feature => rpcNames[feature.properties.rpc] || feature.properties.rpc;
+    const focusName = feature => rpcName(feature.properties.rpc);
     // Fade feature overlays independently of story fill/stroke animation and tiles.
     function selectFocus(feature, recenter = true) {
       focusRegion = feature;
       focusRpc = feature?.properties.rpc || null;
       cards.forEach((card, index) => card.querySelectorAll('.story-stat strong').forEach((value, stat) => {
-        value.textContent = number(countTowns(steps[index].stats[stat].select));
+        value.textContent = number(countStat(steps[index], steps[index].stats[stat].select));
       }));
       focusLayers.forEach(({layer, matches}) => {
         layer.getElement()?.classList.toggle('focus-overlay-hidden', !!focusRpc && !matches(focusRpc));
       });
-      areaLayer.eachLayer(layer => layer.closeTooltip());
-      tierLayer.eachLayer(layer => layer.closeTooltip());
+      clearHover();
       document.getElementById('focus-name').textContent = feature ? focusName(feature) : 'Vermont';
       focusControl.classList.toggle('is-active', !!feature);
       focusClear.hidden = !feature;
