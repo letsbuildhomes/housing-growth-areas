@@ -102,6 +102,18 @@ def export_map(con, memberships=None):
         ORDER BY s.url''').fetchall()
     areas = [geojson_feature(row, area_fields) for row in area_rows]
     towns = [geojson_feature(row, town_fields) for row in town_rows]
+    focus_rpcs = {}
+    if town_rows and rpc_rows:
+        for town_id, rpc in con.execute('''
+            SELECT t.feature_id, r.rpc FROM current_features t
+            JOIN current_features r ON ST_Covers(r.geom, ST_PointOnSurface(t.geom))
+            WHERE t.kind = 'municipality_boundary' AND r.kind = 'rpc_boundary'
+        ''').fetchall():
+            if town_id in focus_rpcs:
+                raise ValueError(f'Ambiguous RPC focus membership: {town_id}')
+            focus_rpcs[town_id] = rpc
+        if len(focus_rpcs) != len(towns):
+            raise ValueError('Missing RPC focus membership for municipality boundary')
     if memberships is None:
         memberships = load_prepared(con)
     eligible_ids = {a['properties']['feature_id'] for a in areas
@@ -110,6 +122,7 @@ def export_map(con, memberships=None):
     eligible = {m['municipality_geoid'] for m in memberships if m['feature_id'] in eligible_ids}
     for town in towns:
         props = town['properties']
+        props['focus_rpc'] = focus_rpcs.get(props['feature_id'])
         props['has_designated_area'] = props['geoid'] in designated
         props['has_likely_eligible'] = props['geoid'] in eligible
     rpcs = [geojson_feature(row, rpc_fields) for row in rpc_rows]
@@ -134,7 +147,99 @@ def export_map(con, memberships=None):
 
 # Add future datasets here. Each exporter receives the same read-only database
 # connection/snapshot and returns JSON-serializable content.
-EXPORTERS = {'interim-areas': export_interim, 'map': export_map}
+DISPLAY_SIMPLIFICATION = {'version': 1, 'crs': 'EPSG:32145', 'tolerance_m': 0.5,
+                          'max_changed_fraction': 0.05, 'boundary_slack_m': 0.001,
+                          'buffer_segments': 64, 'protect_neighbors': False}
+
+
+def simplify_display_geometry(con, geometry):
+    """Simplify a temporary display copy; reject unsafe parts and recombinations."""
+    rules = DISPLAY_SIMPLIFICATION
+    audit = {'retained_parts': [], 'feature_fallback': None}
+    try:
+        original = con.execute("SELECT ST_AsWKB(ST_Transform(ST_GeomFromGeoJSON(?),"
+                               "'EPSG:4326','EPSG:32145',always_xy:=true))",
+                               [json.dumps(geometry)]).fetchone()[0]
+        parts = con.execute('SELECT ST_AsWKB(p.geom) FROM unnest(ST_Dump(ST_GeomFromWKB(?))) t(p) ORDER BY p.path',
+                            [original]).fetchall()
+        chosen = []
+        for index, (part,) in enumerate(parts):
+            try:
+                row = con.execute('''WITH a AS (SELECT ST_GeomFromWKB(?) g),
+                    b AS (SELECT g,ST_SimplifyPreserveTopology(g,?) s FROM a)
+                    SELECT ST_AsWKB(s), ST_IsValid(s) AND NOT ST_IsEmpty(s)
+                      AND ST_NumInteriorRings(g)=ST_NumInteriorRings(s)
+                      AND ST_Area(ST_SymDifference(g,s))<=?*ST_Area(g)
+                      AND ST_Covers(ST_Buffer(ST_Boundary(g),?,64),ST_Boundary(s))
+                      AND ST_Covers(ST_Buffer(ST_Boundary(s),?,64),ST_Boundary(g)) FROM b''',
+                    [part, rules['tolerance_m'], rules['max_changed_fraction'],
+                     rules['tolerance_m']+rules['boundary_slack_m'],
+                     rules['tolerance_m']+rules['boundary_slack_m']]).fetchone()
+                if row[1]:
+                    chosen.append(row[0])
+                    continue
+                reason = 'geometry_checks'
+            except duckdb.Error:
+                reason = 'operation_error'
+            chosen.append(part)
+            audit['retained_parts'].append({'part': index, 'reason': reason})
+        encoded = con.execute('''SELECT ST_AsGeoJSON(ST_Transform(
+            ST_Multi(ST_Collect(list(ST_GeomFromWKB(w) ORDER BY i))),
+            'EPSG:32145','EPSG:4326',always_xy:=true))
+            FROM unnest(?::BLOB[]) WITH ORDINALITY t(w,i)''', [chosen]).fetchone()[0]
+        # Check the actual serialized geometry, including round-trip topology.
+        valid, count, holes = con.execute('''WITH a AS (SELECT ST_GeomFromGeoJSON(?) g)
+            SELECT ST_IsValid(g) AND NOT ST_IsEmpty(g),len(ST_Dump(g)),
+            (SELECT sum(ST_NumInteriorRings(p.geom)) FROM unnest(ST_Dump(g)) t(p)) FROM a''',
+            [encoded]).fetchone()
+        original_holes = con.execute('SELECT sum(ST_NumInteriorRings(p.geom)) FROM unnest(ST_Dump(ST_GeomFromWKB(?))) t(p)',
+                                     [original]).fetchone()[0]
+        if valid and count == len(parts) and holes == original_holes:
+            return json.loads(encoded), audit
+        audit['feature_fallback'] = 'recombined_geometry_checks'
+    except duckdb.Error:
+        audit['feature_fallback'] = 'operation_error'
+    return geometry, audit
+
+
+def export_tier1b(con):
+    """Publish the selected municipal stages from the validated prepared sidecar."""
+    from transform import tier_inputs
+    db_file = con.execute("SELECT path FROM duckdb_databases() WHERE database_name=current_database()").fetchone()[0]
+    path = Path(db_file).parent / 'tier1b-municipal.json'
+    if not path.is_file():
+        raise ValueError('Missing municipal Tier 1B preparation; run make prepare.')
+    document = json.loads(path.read_text())
+    stamp, _, _ = tier_inputs(con)
+    if any(document.get(k) != v for k,v in stamp.items()):
+        raise ValueError('Stale municipal Tier 1B preparation; run make prepare.')
+    features = [f for f in document['areas']['features']
+                if document['selected_stages'][f['properties']['rpc']] == f['properties']['map_stage']]
+    simplification_audit = {}
+    with duckdb.connect(':memory:') as display_con:
+        display_con.execute('LOAD spatial')
+        for feature in features:
+            feature['geometry'], audit = simplify_display_geometry(display_con, feature['geometry'])
+            if audit['retained_parts'] or audit['feature_fallback']:
+                simplification_audit[feature['id']] = audit
+    source_indices = sorted({i for f in features for i in f['properties']['source_indices']})
+    source_ids = sorted({document['audit']['sources'][i]['source_id'] for i in source_indices})
+    sources = con.execute('''SELECT DISTINCT url FROM ingest_sources WHERE run_id=?
+        AND source_id IN (SELECT unnest(?::VARCHAR[])) ORDER BY url''',
+        [stamp['snapshot_id'], source_ids]).fetchall()
+    return {'title': 'Tier 1B boundaries', 'schema_version': 3,
+            'source_view': 'prepared municipal Tier 1B; furthest stage per RPC',
+            'source_urls': [r[0] for r in sources], 'processing_rules': document['rules'],
+            'display_simplification': {'rules': DISPLAY_SIMPLIFICATION,
+                                      'engine': 'DuckDB ' + duckdb.__version__,
+                                      'fallbacks': simplification_audit},
+            'source_records': {str(i): document['audit']['sources'][i] for i in source_indices},
+            'summary': {stage: sum(f['properties']['map_stage']==stage for f in features)
+                        for stage in ('pre_application','application','approved')},
+            'areas': {'type':'FeatureCollection','features':features}}
+
+
+EXPORTERS = {'interim-areas': export_interim, 'map': export_map, 'tier1b': export_tier1b}
 
 
 def export_all(db_path=DB_PATH, output=EXPORT_DIR, memberships_path=MEMBERSHIP_PATH):
@@ -206,14 +311,17 @@ def build(output=DASHBOARD_DIR):
     output = Path(output)
     dataset = json.loads((output / 'data' / 'interim-areas.json').read_text())
     map_dataset = json.loads((output / 'data' / 'map.json').read_text())
+    tier_dataset = json.loads((output / 'data' / 'tier1b.json').read_text())
     manifest = json.loads((output / 'data' / 'manifest.json').read_text())
     for key in ('snapshot_id', 'captured_at', 'exported_at'):
-        if not manifest.get(key) or any(d.get(key) != manifest[key] for d in (dataset, map_dataset)):
+        if not manifest.get(key) or any(d.get(key) != manifest[key] for d in (dataset, map_dataset, tier_dataset)):
             raise ValueError(f'Mismatched or missing export {key}; run make export.')
     if dataset['schema_version'] != 1:
         raise ValueError('Unsupported interim export schema')
     if map_dataset['schema_version'] != 2:
         raise ValueError('Unsupported map export schema')
+    if tier_dataset['schema_version'] != 3:
+        raise ValueError('Unsupported Tier 1B export schema')
     substitutions = {
         '{{LOGO}}': 'data:image/svg+xml;base64,' + base64.b64encode((ROOT / 'web' / 'assets' / 'lbh-logo.svg').read_bytes()).decode('ascii'),
         '{{STYLES}}': (ROOT / 'web' / 'dashboard.css').read_text(),

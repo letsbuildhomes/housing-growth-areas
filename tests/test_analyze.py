@@ -19,6 +19,31 @@ def area(name, category, municipality='EXAMPLE TOWN', **kwargs):
 
 
 class DashboardTests(unittest.TestCase):
+    def test_display_simplification_preserves_holes_and_does_not_mutate_input(self):
+        from analyze import simplify_display_geometry
+        with duckdb.connect(':memory:') as con:
+            con.execute('LOAD spatial')
+            geometry = json.loads(con.execute("""SELECT ST_AsGeoJSON(ST_Transform(
+                ST_GeomFromText('MULTIPOLYGON(((500000 200000,500050 200000.1,500100 200000,500100 200100,500000 200100,500000 200000),(500020 200020,500020 200030,500030 200030,500030 200020,500020 200020)),((500200 200000,500201 200000,500201 200002,500200 200002,500200 200000)))'),
+                'EPSG:32145','EPSG:4326',always_xy:=true))""").fetchone()[0])
+            before = json.dumps(geometry)
+            result, audit = simplify_display_geometry(con, geometry)
+            self.assertEqual(json.dumps(geometry), before)
+            self.assertIsNone(audit['feature_fallback'])
+            self.assertEqual(len(result['coordinates']), 2)
+            self.assertEqual(len(result['coordinates'][0]), 2)
+            self.assertLess(len(result['coordinates'][0][0]), len(geometry['coordinates'][0][0]))
+
+    def test_display_operation_failure_retains_original(self):
+        from analyze import simplify_display_geometry
+        from unittest.mock import Mock
+        con = Mock()
+        con.execute.side_effect = duckdb.InvalidInputException('Synthetic topology error')
+        geometry = {'type': 'Polygon', 'coordinates': [[[0,0],[1,0],[1,1],[0,0]]]}
+        result, audit = simplify_display_geometry(con, geometry)
+        self.assertEqual(result, geometry)
+        self.assertEqual(audit['feature_fallback'], 'operation_error')
+
     def test_story_towns_use_membership_despite_neighboring_geometry(self):
         with duckdb.connect(':memory:') as con:
             con.execute('LOAD spatial')
@@ -36,7 +61,11 @@ class DashboardTests(unittest.TestCase):
                 con.execute("INSERT INTO interim_areas VALUES (?, 'Area', ?, 'village_center_buffer', ?, ST_GeomFromText(?))",
                             [str(index), str(index), eligible, f'POLYGON(({x} 1,{x+1} 1,{x+1} 2,{x} 2,{x} 1))'])
             from transform import inputs
+            # Reference-region assignment must not use tiny border intersections.
+            con.execute("INSERT INTO current_features VALUES ('rpc-a', 'Region A', NULL, NULL, 'rpc_boundary', 'A', ST_GeomFromText('POLYGON((-1 -1,11 -1,11 5,-1 5,-1 -1))'))")
+            con.execute("INSERT INTO current_features VALUES ('rpc-b', 'Region B', NULL, NULL, 'rpc_boundary', 'B', ST_GeomFromText('POLYGON((11 -1,35 -1,35 5,11 5,11 -1))'))")
             result = export_map(con, derive_memberships(*inputs(con)))
+            self.assertEqual([f['properties']['focus_rpc'] for f in result['towns']['features']], ['A', 'B', 'B', 'B'])
             flags = [(f['properties']['has_designated_area'], f['properties']['has_likely_eligible']) for f in result['towns']['features']]
             self.assertEqual(flags, [(True, True), (True, False), (True, False), (False, False)])
             self.assertEqual(result['summary']['towns_with_designated_area'], 3)
@@ -83,6 +112,7 @@ class DashboardTests(unittest.TestCase):
             (output / 'data' / 'manifest.json').write_text(json.dumps(common))
             payload = {**common, 'schema_version': 1, 'name': '</script><img src=x onerror=alert(1)>&'}
             (output / 'data' / 'interim-areas.json').write_text(json.dumps(payload))
+            (output / 'data' / 'tier1b.json').write_text(json.dumps({**common, 'schema_version': 3}))
             (output / 'data' / 'map.json').write_text(json.dumps({
                 **common, 'schema_version': 2, 'areas': {'type': 'FeatureCollection', 'features': []},
                 'towns': {'type': 'FeatureCollection', 'features': []},

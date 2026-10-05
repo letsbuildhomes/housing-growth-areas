@@ -10,6 +10,8 @@ DB_PATH = DATA_DIR / 'act181_ingest.duckdb'
 DASHBOARD_DIR = OUT_DIR / 'dashboard'
 EXPORT_DIR = DASHBOARD_DIR / 'data'
 MEMBERSHIP_PATH = DATA_DIR / 'municipality-memberships.json'
+TIER_RULES = {'version': 1, 'crs': 'EPSG:32145', 'boundary_band_m': 75,
+              'closing_radius_m': 1.5, 'minimum_part_m2': 1}
 
 
 # Publisher value mappings

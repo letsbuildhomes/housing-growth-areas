@@ -470,6 +470,122 @@ array; it is not duplicated here.
 
 ## Dashboard export contract
 
+RPC focus counts use the saved RPC containing each municipality's interior
+point (`ST_PointOnSurface`), exported as `focus_rpc`. This display-only reference
+assignment leaves approved interim-area memberships and eligibility flags intact;
+border slivers do not confer membership in a second RPC. The September 8 snapshot
+assigns all 256 towns uniquely across 11 RPCs. Focus selection recomputes all five
+chapters' counts. Overlay visibility follows municipality RPC membership, using
+the existing approved memberships for interim areas (shared areas remain visible
+if either municipality belongs to the focus). Selected features retain their
+full geometry, including border spillovers. Other overlays fade out independently
+of story styling; basemap tiles remain visible everywhere.
+
+The fourth chapter overlays the working Tier 1B map in teal (#287f89),
+with 60% fill opacity. Hover labels identify the selected stage and RPC.
+Its transition cools old negative municipal colors to brown while replacing
+interim polygons with Tier 1B wherever the municipality has a working Tier 1B area.
+Elsewhere, nonexempt interim polygons disappear and exempt polygons remain brown.
+It then highlights municipalities with Tier 1B but no temporary exemption in green.
+The fifth chapter cools those gains to teal, then highlights the remaining
+temporary-only exempt polygons and their municipalities in coral.
+Municipalities with both stay teal; those with neither stay brown. Comparison uses
+official GEOIDs from the existing memberships and selected municipal Tier 1B
+export, not new spatial intersections or all historical Tier 1B stages.
+Step two introduces designated areas in teal and their municipalities in gain green,
+and municipalities without areas in coral. At the beginning of the transition
+to step three, those colors settle to teal and brown before new ineligible
+areas and municipalities turn coral. Step four settles prior losses to brown
+while introducing Tier 1B polygons in teal and then new municipal gains in green.
+Green is reserved for municipal delta highlights. Story keys use “temporary
+exemptions” and “Exempt” / “Not exempt”; source eligibility fields are unchanged.
+Hidden interim polygons do not receive pointer events;
+reverse navigation restores their previous styles and interactions.
+
+`tier1b.json` (schema 3) exports the prepared municipal working map separately from
+the existing map/table contracts, with capture/export provenance and source URLs.
+Each feature identifies its municipality/GEOID, RPC and stage, with source indices
+linking to source feature/object/layer IDs and publisher submission/approval fields.
+Geometry is derived using the rules below. The page validates its generation against the other
+exports. Source acquisition is not needed.
+
+Approved September 14, 2026: `tier1b_working` selects the furthest populated
+Tier 1B map stage for each feature RPC: approved > application > pre-application.
+An empty stage means that region has not completed that stage. Selection is
+region-wide, not per municipality or individual polygon, and uses `map_stage`,
+not `submission_version` or `lurb_status`. All rows in the selected stage remain,
+including missing/invalid geometry; no spatial repair or deduplication is implied.
+Original stage views and source records remain available. The view preserves all
+`map_features` columns, including stage and provenance, without storing copies.
+This rule describes the saved capture, not live application progress.
+
+### Municipal Tier 1B derivation — approved September 14, 2026
+
+Display simplification investigation (September 14, 2026): the current
+100-record working export has 503 parts and 105 holes.
+Independent part simplification with a 5% symmetric-difference safeguard and
+two-way boundary-buffer checks reduces the 13.44 MB export to 3.84 MB at 0.5 m,
+but changes existing intermunicipal overlaps. Preserving original parts within
+twice the tolerance of another municipality's parts avoids those overlap changes
+in this snapshot and produces 5.29 MB (1.87 MB gzip). The corresponding 0.25 m
+and 0.75 m exports are 6.13 MB and 5.19 MB. These are display-only candidates;
+analytical geometry and area metadata remain unchanged. Reproducible experiment
+and evidence are saved locally in `out/geometry-review/parts.py`,
+`part-simplification.ipynb`, `part-results.json`, and `part-report.html`.
+The rules use geometry checks rather than municipality-specific exceptions.
+Production integration now includes operation-error fallback and final
+serialized-output validation, as described below. The neighbor-protection
+experiment preserved existing overlaps rather than repairing them; that
+protection was not adopted. Numerical checks do not certify the meaning of
+every narrow road or corridor.
+
+Approved and implemented display rule (September 14, 2026): `analyze.py` applies
+0.5 m simplification per connected part, retaining originals if symmetric
+difference exceeds 5%, holes change, validity fails, or either boundary exceeds
+the other's 0.501 m buffer (64 segments per quadrant). Operation errors retain
+original geometry. Recombined serialized geometry must remain valid and retain
+part/hole counts; otherwise the whole feature falls back. No neighboring-boundary
+protection is applied: small display seams/overlap changes are an accepted tradeoff.
+`tier1b.json` retains schema 3 and adds `display_simplification` rules, engine
+version, and fallback provenance (zero-based part indices). Detailed sidecar
+geometry and all area/status/membership properties remain authoritative and
+unchanged. Current export: 3.84 MB, 23 part fallbacks, no whole-feature fallbacks.
+
+`make prepare` also regenerates `data/tier1b-municipal.json` from all three
+original Tier 1B stages, reading the ingest database without changing it.
+The sidecar retains all derived municipal stages. The website selects the
+furthest populated original map stage per RPC, with no per-town fallback.
+This spatial rule applies only to Tier 1B, not interim municipality memberships.
+
+Geometry is projected to EPSG:32145 meters and repaired in a temporary copy.
+Connected polygon parts smaller than 1 m² are removed before assignment and
+after closing. Holes are not treated as standalone fragments.
+A municipality qualifies when a connected intersection reaches its interior
+beyond a 75 m inward boundary band. One qualifying town receives the whole
+source part, including minor border protrusions. Multiple qualifying towns
+receive their intersections; each remaining connected spillover goes to the
+qualifying split nearest its centroid, with GEOID as a deterministic tie-breaker.
+Parts with no qualifying municipality remain in the audit, not the displayed map.
+
+Assigned parts are unioned per RPC/GEOID/stage and closed with a 1.5 m positive
+then negative buffer, followed by validity repair and polygon extraction. No
+final municipal clipping is performed. Validity is checked before publication.
+Unrecoverable operations stop preparation without replacing the previous file.
+Raw geometry and all original stage views remain unchanged.
+
+The sidecar records snapshot, input SHA-256, versioned rules in `config.py`,
+source lineage, removed-part areas, unassigned geometry (projected WKB), source
+validity repairs, and areas before/after closing. Export rejects stale preparation.
+Increment `TIER_RULES.version` when changing the algorithm. Revalidate output
+when changing spatial-library versions.
+
+The current derivation has 182 municipal stage records (109 pre-application,
+41 application, 32 approved); 100 are selected for the working map. It removes
+146 sub-1 m² parts totaling 47.756 m² across stages. The audit retains 21 parts
+with no qualifying municipality totaling 32,756.366 m² across stages.
+Proctor's approved shape retains approximately 9,637 m² inside Pittsford's
+reference boundary, while Pittsford has no assigned approved/application record.
+
 `analyze.py` reads DuckDB in one read-only transaction and validates the prepared
 membership file against the capture, rule values/version, and input fingerprint.
 It serializes a complete generation before replacing `out/dashboard/data`.

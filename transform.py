@@ -182,6 +182,18 @@ def initialize(con):
     }
     for name, where in views.items():
         con.execute(f'CREATE OR REPLACE VIEW {name} AS SELECT * FROM map_features WHERE {where}')
+    create_tier1b_working_view(con)
+
+
+def create_tier1b_working_view(con):
+    """Select the furthest populated map stage per source RPC, retaining raw rows."""
+    con.execute('''CREATE OR REPLACE VIEW tier1b_working AS
+        SELECT * FROM map_features
+        WHERE kind = 'tier' AND tier_code = '1B'
+          AND map_stage IN ('pre_application', 'application', 'approved')
+        QUALIFY dense_rank() OVER (PARTITION BY rpc ORDER BY
+            CASE map_stage WHEN 'approved' THEN 3 WHEN 'application' THEN 2 ELSE 1 END
+            DESC) = 1''')
 
 
 def load_snapshot(directory, db_path=DB_PATH):
@@ -364,6 +376,128 @@ def load_prepared(con, path=MEMBERSHIP_PATH):
     return document['memberships']
 
 
+def tier_inputs(con):
+    rows = con.execute('''SELECT run_id, feature_id, layer_id, source_id, source_oid,
+        rpc, map_stage, submission_version, lurb_status, ST_AsGeoJSON(geom)
+        FROM map_features WHERE kind='tier' AND tier_code='1B'
+        AND map_stage IN ('pre_application','application','approved')
+        ORDER BY rpc,map_stage,layer_id,feature_id''').fetchall()
+    towns = con.execute('''SELECT geoid,municipality,ST_AsGeoJSON(geom)
+        FROM current_features WHERE kind='municipality_boundary' ORDER BY geoid''').fetchall()
+    stamp = {'schema_version': 1, 'snapshot_id': con.execute(
+        'SELECT run_id FROM latest_ingest_run').fetchone()[0], 'rules': config.TIER_RULES,
+        'inputs_sha256': hashlib.sha256(json.dumps([rows,towns]).encode()).hexdigest()}
+    return stamp, rows, towns
+
+
+def derive_tier_municipal(con):
+    """Spatial assignment in meters. Temporary tables never modify ingest data."""
+    stamp, rows, towns = tier_inputs(con)
+    band = config.TIER_RULES['boundary_band_m']
+    radius = config.TIER_RULES['closing_radius_m']
+    minimum = config.TIER_RULES['minimum_part_m2']
+    crs = config.TIER_RULES['crs']
+    con.execute('CREATE OR REPLACE TEMP TABLE tier_towns (geoid VARCHAR, name VARCHAR, g GEOMETRY, core GEOMETRY)')
+    for geoid,name,geo in towns:
+        con.execute('''INSERT INTO tier_towns SELECT ?,?,g,ST_Buffer(g,?) FROM
+            (SELECT ST_MakeValid(ST_Transform(ST_GeomFromGeoJSON(?),'EPSG:4326',?,always_xy:=true)) g)''',
+            [geoid,name,-band,geo,crs])
+    con.execute('CREATE OR REPLACE TEMP TABLE assigned (geoid VARCHAR,rpc VARCHAR,stage VARCHAR,source_index INTEGER,g GEOMETRY)')
+    audit = {'removed_parts': [], 'unassigned_parts': [], 'repairs': [], 'sources': []}
+    for index,row in enumerate(rows):
+        run,fid,lid,sid,oid,rpc,stage,version,status,geo = row
+        audit['sources'].append(dict(feature_id=fid,layer_id=lid,source_id=sid,source_oid=oid,
+                                     rpc=rpc,map_stage=stage,submission_version=version,lurb_status=status))
+        if geo is None:
+            audit['unassigned_parts'].append({'source_index':index,'reason':'missing geometry'})
+            continue
+        con.execute('''CREATE OR REPLACE TEMP TABLE source_geom AS SELECT
+            ST_Transform(ST_GeomFromGeoJSON(?),'EPSG:4326',?,always_xy:=true) g''',[geo,crs])
+        if not con.execute('SELECT ST_IsValid(g) FROM source_geom').fetchone()[0]:
+            audit['repairs'].append({'source_index':index,'operation':'source validity repair'})
+        parts = con.execute('''SELECT ST_AsWKB(part.geom) FROM source_geom,
+            unnest(ST_Dump(ST_CollectionExtract(ST_MakeValid(g),3))) parts(part)''').fetchall()
+        for part_index,(wkb,) in enumerate(parts):
+            con.execute('CREATE OR REPLACE TEMP TABLE part AS SELECT ST_GeomFromWKB(?) g',[wkb])
+            area = con.execute('SELECT ST_Area(g) FROM part').fetchone()[0]
+            if area < minimum:
+                audit['removed_parts'].append(dict(source_index=index,part=part_index,area_m2=area,operation='input'))
+                continue
+            # Qualification is per intersected connected component, not touching bounds.
+            con.execute('''CREATE OR REPLACE TEMP TABLE qualified AS SELECT DISTINCT t.geoid FROM
+                tier_towns t,part p,unnest(ST_Dump(ST_CollectionExtract(ST_Intersection(t.g,p.g),3))) pieces(piece)
+                WHERE ST_Intersects(t.g,p.g) AND ST_Area(piece.geom)>0 AND ST_Intersects(piece.geom,t.core)''')
+            ids = con.execute('SELECT geoid FROM qualified ORDER BY geoid').fetchall()
+            if not ids:
+                audit['unassigned_parts'].append(dict(source_index=index,part=part_index,area_m2=area,
+                    geometry_wkb_hex=bytes(wkb).hex(),reason='no qualifying municipality'))
+                continue
+            if len(ids)==1:
+                con.execute('INSERT INTO assigned SELECT ?,?,?,?,g FROM part',[ids[0][0],rpc,stage,index])
+            else:
+                con.execute('''CREATE OR REPLACE TEMP TABLE splits AS SELECT t.geoid,
+                    ST_CollectionExtract(ST_Intersection(t.g,p.g),3) g
+                    FROM tier_towns t JOIN qualified q USING(geoid),part p''')
+                con.execute('INSERT INTO assigned SELECT geoid,?,?,?,g FROM splits',[rpc,stage,index])
+                # Preserve minor external protrusions: attach each to nearest qualifying split.
+                residuals = con.execute('''SELECT ST_AsWKB(piece.geom) FROM part,
+                    (SELECT ST_Union_Agg(g) covered FROM splits),
+                    unnest(ST_Dump(ST_CollectionExtract(ST_Difference(g,covered),3))) pieces(piece)
+                    WHERE ST_Area(piece.geom)>0''').fetchall()
+                for (residual,) in residuals:
+                    owner = con.execute('''SELECT geoid FROM splits ORDER BY
+                        ST_Distance(g,ST_Centroid(ST_GeomFromWKB(?))),geoid LIMIT 1''',[residual]).fetchone()[0]
+                    con.execute('INSERT INTO assigned VALUES (?,?,?,?,ST_GeomFromWKB(?))',[owner,rpc,stage,index,residual])
+    features=[]
+    groups=con.execute('''SELECT a.geoid,t.name,a.rpc,a.stage,list(DISTINCT source_index ORDER BY source_index),
+        ST_AsWKB(ST_Union_Agg(a.g)) FROM assigned a JOIN tier_towns t USING(geoid)
+        GROUP BY a.geoid,t.name,a.rpc,a.stage ORDER BY a.rpc,t.name,a.stage''').fetchall()
+    for geoid,name,rpc,stage,sources,wkb in groups:
+        con.execute('''CREATE OR REPLACE TEMP TABLE merged AS SELECT ST_MakeValid(ST_GeomFromWKB(?)) g''',[wkb])
+        # Closing is not clipped to municipal boundaries: whole-part assignments retain protrusions.
+        con.execute('''CREATE OR REPLACE TEMP TABLE closed AS SELECT
+            ST_CollectionExtract(ST_MakeValid(ST_Buffer(ST_Buffer(g,?),-?)),3) g FROM merged''',[radius,radius])
+        removed=con.execute('''SELECT ST_Area(piece.geom) FROM closed,unnest(ST_Dump(g)) pieces(piece)
+            WHERE ST_Area(piece.geom)<?''',[minimum]).fetchall()
+        audit['removed_parts'].extend(dict(geoid=geoid,stage=stage,area_m2=a,operation='output') for (a,) in removed)
+        con.execute('''CREATE OR REPLACE TEMP TABLE final_tier AS SELECT ST_Union_Agg(piece.geom) g
+            FROM closed,unnest(ST_Dump(g)) pieces(piece) WHERE ST_Area(piece.geom)>=?''',[minimum])
+        result=con.execute('''SELECT ST_IsValid(g),ST_Area(g),ST_AsGeoJSON(
+            ST_Transform(g,?,'EPSG:4326',always_xy:=true)) FROM final_tier''',[crs]).fetchone()
+        if result[2] is None:
+            continue
+        if not result[0]:
+            raise ValueError(f'Invalid derived Tier 1B geometry: {name} {stage}')
+        before=con.execute('SELECT ST_Area(g) FROM merged').fetchone()[0]
+        features.append({'type':'Feature','id':f'{rpc}:{geoid}:{stage}',
+            'properties':dict(feature_id=f'{rpc}:{geoid}:{stage}',municipality=name,geoid=geoid,
+                rpc=rpc,map_stage=stage,source_indices=sources,area_m2=result[1],
+                area_before_closing_m2=before), 'geometry':json.loads(result[2])})
+    rank={'pre_application':1,'application':2,'approved':3}
+    selected={}
+    for row in rows:
+        rpc,stage=row[5:7]
+        if rank[stage]>rank.get(selected.get(rpc),0): selected[rpc]=stage
+    return {**stamp,'selected_stages':selected,'areas':{'type':'FeatureCollection','features':features},'audit':audit}
+
+
+def prepare_tier(db_path=DB_PATH, output=None):
+    output=Path(output) if output else Path(db_path).parent/'tier1b-municipal.json'
+    if not Path(db_path).is_file(): raise ValueError('Restore the saved database first')
+    with duckdb.connect(str(db_path),read_only=True) as con:
+        con.execute('LOAD spatial')
+        con.execute('BEGIN TRANSACTION')
+        stamp,_,_=tier_inputs(con)
+        if output.is_file():
+            saved=json.loads(output.read_text())
+            if all(saved.get(k)==v for k,v in stamp.items()):
+                return
+        document=derive_tier_municipal(con)
+        con.execute('COMMIT')
+    write_json(output,document)
+    print(f'Prepared {len(document["areas"]["features"])} municipal Tier 1B stage records → {output}')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     source = parser.add_mutually_exclusive_group(required=True)
@@ -375,6 +509,7 @@ def main():
     if args.snapshot:
         load_snapshot(args.snapshot, args.db)
     prepare(args.db, args.memberships)
+    prepare_tier(args.db)
 
 
 if __name__ == '__main__':
