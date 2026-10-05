@@ -29,6 +29,7 @@ Missing data produces an error; it never triggers acquisition or sample data.
 | `make export` / `make prepare` | Regenerate JSON exports / prepared municipality relationships. |
 | `make status` | Show saved capture coverage and quality flags. |
 | `make serve PORT=8001` | Build and preview on a chosen port. |
+| `make deploy` | Build from saved data and publish the dashboard to vibes. |
 | `make clean` / `make rebuild` | Remove / rebuild only `out/dashboard`. |
 | `make test` | Run Python tests under `tests/`. |
 
@@ -47,6 +48,23 @@ rules and automatic fallbacks.
 Preview with `make serve`; opening the HTML directly via `file://` cannot load JSON.
 Polygons and the table work on a local server without internet; optional
 OpenStreetMap tiles need internet.
+
+For preview access from another machine on the network, run
+`make serve HOST=0.0.0.0 PORT=8000` and open `http://<server-network-IP>:8000/`.
+
+## Vibes deployment
+
+Run `make deploy` to publish at
+`https://vibes.jaktiano.com/housing-growth-areas/`. It uses the existing
+`VIBES_DEPLOY_HOST` environment variable and your SSH configuration; the host
+must support noninteractive SSH authentication. Deployment requires `ssh` and
+`rsync` locally.
+
+The target builds from the saved database, then uploads only `out/dashboard/`
+to `/srv/http/vibes/housing-growth-areas/`. It removes obsolete files within
+that project directory, sets readable file permissions, and updates the remote
+directory timestamp after upload. Data acquisition remains an explicit
+`make ingest` operation.
 
 ## Project layout
 
@@ -112,7 +130,26 @@ browser scripts, reports pass/fail, and needs no extra runtime. These checks are
 manual and are not part of `make test`. Also inspect filters/reset, merged cells,
 map navigation, hover values, and narrow layouts when changing their behavior.
 
-Chapter copy, groups, and counts live in `web/dashboard.js`; scroll timeline sampling
+Stories are registered in `web/stories.js`, whose `active` ID chooses the published
+journey. `web/story-act181.js` preserves the original five chapters with
+`enabled: false`; `web/story-overview.js` is the active three-chapter starting point
+for the next research question. Disabled stories are never mounted or reachable
+through a URL. To restore the original, set its `enabled` flag to `true`, change
+`active` to `act181`, then run `make page`. Only the active story is visible.
+
+Each story's `create` function receives saved map/Tier 1B data and the shared
+palette, and returns `steps` (copy, municipality count predicates, polygon keys)
+and `groups` (one nonempty transition group per chapter interval). For example,
+`item.kind === 'tier' ? {opacity: 0.9, fillOpacity: 0.6} : {}` reveals Tier 1B.
+Transitions target shared `town`, `area`, and `tier` layers; hidden polygon
+interactions follow their sampled opacity, regardless of chapter order.
+To add a story, register a unique ID in a new `web/story-*.js` file and include it
+before `dashboard.js` in `analyze.py`'s script list. New polygon datasets still need
+a provenance-validated export and a layer adapter in `dashboard.js`; story files
+do not acquire data. Stories require at least two chapters. Scroll distance and
+navigation adapt to the chapter count. No public story picker is shown.
+
+Chapter copy, groups, and counts live in the story files; scroll timeline sampling
 lives in `web/story-animation.js`; display-only criteria logic lives in
 `web/eligibility-display.js`. Colors and layout live in `web/dashboard.css`.
 The logo at `web/assets/lbh-logo.svg` was downloaded unmodified on September 12,
@@ -133,7 +170,7 @@ Native movement retains basemap tile levels throughout zooming; tile fade-in is
 disabled. Focus opacity transitions apply only to vector overlays.
 
 On viewports at least 1000px wide and 700px tall, the map fills a sticky viewport
-while native page scrolling selects five chapters with 125vh between chapters
+while native page scrolling selects the active story's chapters with 125vh between chapters
 and no final scroll hold. Map styles and card positions are sampled directly from scroll position;
 there is no timed playback to catch up after fast scrolling. Cards move over each
 entire interval on a smoothstep ease-in/ease-out curve, leaving upward and entering

@@ -14,6 +14,9 @@ These checks load the same scripts as the dashboard. No server or extra runtime 
 <ol id="results"></ol>
 <script src="../web/story-animation.js?scroll-timeline=3"></script>
 <script src="../web/eligibility-display.js"></script>
+<script src="../web/stories.js"></script>
+<script src="../web/story-act181.js"></script>
+<script src="../web/story-overview.js"></script>
 <script>
 'use strict';
 let passed = 0, failed = 0;
@@ -39,6 +42,21 @@ const assert = {
 };
 const display = EligibilityDisplay;
 const {compile, player, timing} = window.MapStoryAnimation;
+test('active story has independent chapters and reversible polygon visibility', () => {
+  const context = {tierData: {areas: {features: []}}, colors: {
+    positive: '#112233', negative: '#445566', unknown: '#778899'}, areaColor: () => '#112233'};
+  const story = MapStories.create(context);
+  assert.equal(story.steps.length, 3);
+  const initial = ['area', 'tier'].map(kind => ({kind, props: {},
+    style: {color: '#112233', fillColor: '#112233', opacity: 0, fillOpacity: 0}}));
+  const timeline = compile(initial, story.groups);
+  assert.deepEqual(timeline.sample(timeline.stops[2]).map(i => i.style.opacity), [0, 0.9]);
+  assert.deepEqual(timeline.sample(timeline.stops[1]).map(i => i.style.opacity), [1, 0]);
+  assert.deepEqual(timeline.sample(0).map(i => i.style.opacity), [0, 0]);
+  let rejected = false;
+  try {MapStories.create(context, 'act181');} catch {rejected = true;}
+  assert.equal(rejected, true);
+});
 test('progress follows the rendered map across unequal chapter lengths and reversals', () => {
   const chapter = position => MapStoryAnimation.chapterAt(position, [0, 4, 6.5]);
   for (const [position, expected] of [[0, 0], [2, .5], [4, 1], [5.25, 1.5], [6.5, 2], [2, .5], [-1, 0], [9, 2]]) {

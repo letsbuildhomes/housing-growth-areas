@@ -264,7 +264,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .map-controls .leaflet-control-zoom a:hover { background: #dcebe5; }
 @media (min-width: 1000px) and (min-height: 700px) {
   .page-heading { padding: 12px 0 24px; }
-  .map-panel { container-type: normal; overflow: visible; border: 0; border-radius: 0; width: 100vw; margin: 28px 0 0; margin-left: calc(50% - 50vw); height: 600vh; }
+  .map-panel { container-type: normal; overflow: visible; border: 0; border-radius: 0; width: 100vw; margin: 28px 0 0; margin-left: calc(50% - 50vw); height: var(--story-height, 600vh); }
   .map-stage { position: sticky; top: 0; height: 100vh; isolation: isolate; overflow: hidden; background: #edf3f5; }
   .map-layout { display: block; border: 0; height: 100%; }
   .map { position: absolute; inset: 0; height: 100%; }

@@ -481,7 +481,12 @@ if either municipality belongs to the focus). Selected features retain their
 full geometry, including border spillovers. Other overlays fade out independently
 of story styling; basemap tiles remain visible everywhere.
 
-The fourth chapter overlays the working Tier 1B map in teal (#287f89),
+The preserved `act181` story (currently disabled) uses the following chapter
+sequence. The active saved-map overview independently introduces boundaries,
+publisher-reported interim eligibility, then the selected working Tier 1B map;
+it does not introduce a new analytical comparison or change export contracts.
+
+The original fourth chapter overlays the working Tier 1B map in teal (#287f89),
 with 60% fill opacity. Hover labels identify the selected stage and RPC.
 Its transition cools old negative municipal colors to brown while replacing
 interim polygons with Tier 1B wherever the municipality has a working Tier 1B area.

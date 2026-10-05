@@ -3,9 +3,10 @@ PORT ?= 8000
 HOST ?= 127.0.0.1
 WORKERS ?= 4
 SNAPSHOT ?=
+VIBES_PROJECT := housing-growth-areas
 
 .DEFAULT_GOAL := build
-.PHONY: all build export prepare ingest extract transform analyze page status clean rebuild serve test help setup-spatial
+.PHONY: all build export prepare ingest extract transform analyze page status clean rebuild serve deploy test help setup-spatial
 
 all: build
 
@@ -64,9 +65,19 @@ rebuild:
 serve: build
 	$(UV) -m http.server $(PORT) --bind $(HOST) -d out/dashboard
 
+deploy:
+	@: "$${VIBES_DEPLOY_HOST:?Set VIBES_DEPLOY_HOST to user@server or an SSH alias}"
+	@printf '%s\n' "$(VIBES_PROJECT)" | LC_ALL=C grep -Eq '^[a-z0-9][a-z0-9-]*$$' || { echo 'Invalid VIBES_PROJECT' >&2; exit 1; }
+	$(MAKE) build
+	ssh -o BatchMode=yes "$$VIBES_DEPLOY_HOST" 'mkdir -p /srv/http/vibes/$(VIBES_PROJECT)'
+	rsync -az --delete --chmod=D755,F644 -e 'ssh -o BatchMode=yes' out/dashboard/ "$${VIBES_DEPLOY_HOST}:/srv/http/vibes/$(VIBES_PROJECT)/"
+	ssh -o BatchMode=yes "$$VIBES_DEPLOY_HOST" 'touch -m -- /srv/http/vibes/$(VIBES_PROJECT)'
+	@echo 'Published'
+
 help:
 	@echo 'Local: make/build, export, prepare, analyze, page, status, test'
 	@echo 'Preview: make serve [PORT=8001] [HOST=127.0.0.1]'
+	@echo 'Deploy: make deploy (requires VIBES_DEPLOY_HOST; publishes dashboard to vibes)'
 	@echo 'Restore: make transform SNAPSHOT=in/snapshots/<capture> (no downloads)'
 	@echo 'Network: make extract (capture only), ingest (capture + load), setup-spatial'
 	@echo 'Cleanup: make clean/rebuild (dashboard output only; preserves research data)'
