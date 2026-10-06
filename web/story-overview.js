@@ -18,7 +18,7 @@ window.MapStories.register({
       (mapData?.towns?.features || []).some(f => !summaries.has(f.properties.geoid));
     const hasUnknownCoverage = (housingData.coverage_parts?.features || []).some(f => f.properties.coverage_kind === 'unknown');
     const hasUnknownBlocks = (housingData.blocks?.features || []).some(f => f.properties.coverage_status === 'unknown');
-    const coverageKey = [[colors.gain, 'Covered by Tier 1B'], [colors.negative, 'Not covered by Tier 1B'],
+    const coverageKey = [[colors.gain, 'Mapped as Tier 1B'], [colors.negative, 'Not mapped as Tier 1B'],
       ...(hasUnknownCoverage ? [[colors.unknown, 'Cannot assess']] : [])];
     return {
       overlays: ['housing-category', 'housing-block', 'housing-coverage'],
@@ -38,16 +38,16 @@ window.MapStories.register({
             {select: noGrowth, label: 'No Housing Growth Areas', color: colors.negative},
             ...(hasUnknownGrowth ? [{select: unknownGrowth, label: 'Cannot assess Housing Growth Areas', color: colors.unknown}] : [])],
           areaKey: [[colors.positive, 'Housing Growth Areas']]},
-        {title: 'Not every Housing Growth Area has Tier 1B', municipalityView: 'coverage',
+        {title: 'Not every Housing Growth Area is Tier 1B', municipalityView: 'coverage',
           description: 'Green marks the parts of Housing Growth Areas on track for Tier 1B. Red marks the parts being left behind. Not every Tier 1B map is approved yet; hover for each submission stage.',
           statsOf: 'areas', statsTitle: 'Housing Growth Areas',
-          stats: [['substantial', 'Covered by Tier 1B'], ['partial', 'Partly covered'], ['none', 'Not covered'],
+          stats: [['substantial', 'Mapped as Tier 1B'], ['partial', 'Partly mapped as Tier 1B'], ['none', 'Not mapped as Tier 1B'],
             ...(hasUnknownBlocks ? [['unknown', 'Cannot assess']] : [])]
             .map(([state, label]) => ({select: b => b.coverage_status === state, label})),
           areaKey: coverageKey},
-        {title: 'Tier 1B coverage by municipality', municipalityView: 'coverage', municipalFill: true,
+        {title: 'Tier 1B designation by municipality', municipalityView: 'coverage', municipalFill: true,
           description: 'Green municipalities have Tier 1B across all of their Housing Growth Areas, yellow across some, and red across none. Gray municipalities have no Housing Growth Areas.',
-          stats: [['all', 'All covered'], ['some', 'Partly covered'], ['none', 'None covered'],
+          stats: [['all', 'Full Tier 1B designation'], ['some', 'Partial Tier 1B designation'], ['none', 'No Tier 1B designation'],
             ['no_housing', 'No Housing Growth Areas'], ...(hasUnknownTowns ? [['unknown', 'Cannot assess']] : [])]
             .map(([state, label]) => ({select: p => townStatus(p) === state, label, color: municipalColors[state]})),
           areaKey: coverageKey},

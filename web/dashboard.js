@@ -74,11 +74,11 @@
       return `${heading}<div class="area-hover-type">${plural(p.block_count, 'Housing Growth Area')}<br>${acres(p.area_m2)}${
         p.municipality_area_m2 ? ` · ${percent(p.area_m2 / p.municipality_area_m2)} of ${escapeHTML(props.name || props.municipality)}` : ''}</div>${stage}`;
     }
-    // List every nonzero outcome so partly covered areas are never folded into "not covered".
-    const outcomes = [[p.substantial_count, 'covered'], [p.partial_count, 'partly covered'],
-      [p.none_count, 'not covered'], [p.unknown_count, 'cannot assess']]
+    // List every nonzero outcome so partly mapped areas are never folded into "not mapped".
+    const outcomes = [[p.substantial_count, 'mapped as Tier 1B'], [p.partial_count, 'partly mapped'],
+      [p.none_count, 'not mapped'], [p.unknown_count, 'cannot assess']]
       .filter(([count]) => count).map(([count, label]) => `${number(count)} ${label}`).join(' · ');
-    return `${heading}<div class="area-hover-type">${plural(p.block_count, 'Housing Growth Area')}<br>${outcomes}<br>Tier 1B covers ${percent(p.coverage_fraction)} of ${acres(p.area_m2)}</div>${stage}`;
+    return `${heading}<div class="area-hover-type">${plural(p.block_count, 'Housing Growth Area')}<br>${outcomes}<br>${percent(p.coverage_fraction)} of ${acres(p.area_m2)} mapped as Tier 1B</div>${stage}`;
   }
   const areaColor = value => value === true ? mapColors.positive : value === false ? mapColors.negative : mapColors.unknown;
   const areaDetails = new Map(data.municipalities.flatMap(group =>
@@ -219,7 +219,7 @@
     outlinePane.style.pointerEvents = 'none';
     const categoryLabels = {VA: 'Village Area', VC: 'Village Center', PGA: 'Planned Growth Area', DC: 'Downtown Center'};
     const place = p => `<div class="area-hover-town">${escapeHTML(p.municipality || 'Unknown municipality')} · ${escapeHTML(rpcName(p.rpc))}</div>`;
-    const coverageTitles = {covered: 'Covered by Tier 1B', uncovered: 'Not covered by Tier 1B', unknown: 'Tier 1B coverage unknown'};
+    const coverageTitles = {covered: 'Mapped as Tier 1B', uncovered: 'Not mapped as Tier 1B', unknown: 'Tier 1B status unknown'};
     // Green and red pieces share one template; only the coverage title differs.
     function housingTooltip(kind, p) {
       if (kind === 'housing-category') {

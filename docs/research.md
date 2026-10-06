@@ -967,6 +967,11 @@ by Tier 1B”, partly covered, not covered). Municipal hovers list every nonzero
 block outcome, so a partly covered block is never reported as uncovered. Areas crossing a municipal line remain one
 block per municipality, as in the analysis.
 
+Wording revision, October 6, 2026: story labels and hovers say “mapped as
+Tier 1B” instead of “covered by Tier 1B,” and the municipal chapter is titled
+“Tier 1B designation by municipality” (full, partial, or no designation).
+Export fields and classifications are unchanged.
+
 Hovers report one **submission stage**, the selected regional `map_stage`
 (pre-application, application, or approved). In this snapshot the selected FLU
 and Tier 1B stages match in every RPC, and source fields follow the stage
