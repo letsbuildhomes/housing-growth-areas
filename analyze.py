@@ -407,7 +407,7 @@ def build(output=DASHBOARD_DIR):
         '{{LEAFLET_CSS}}': (ROOT / 'web' / 'vendor' / 'leaflet.css').read_text(),
         '{{LEAFLET_JS}}': (ROOT / 'web' / 'vendor' / 'leaflet.js').read_text(),
         '{{SCRIPT}}': '\n'.join((ROOT / 'web' / name).read_text() for name in
-                               ('story-animation.js', 'eligibility-display.js', 'stories.js',
+                               ('story-animation.js', 'map-interactions.js', 'eligibility-display.js', 'stories.js',
                                 'story-act181.js', 'story-overview.js', 'dashboard.js')),
     }
     html = (ROOT / 'web' / 'index.html').read_text()

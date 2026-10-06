@@ -12,6 +12,9 @@ body {font: 16px system-ui; max-width: 60rem; margin: 3rem auto; padding: 0 1rem
 These checks load the same scripts as the dashboard. No server or extra runtime is needed.</p>
 <p id="summary" role="status">Running…</p>
 <ol id="results"></ol>
+<link rel="stylesheet" href="../web/vendor/leaflet.css">
+<script src="../web/vendor/leaflet.js"></script>
+<script src="../web/map-interactions.js"></script>
 <script src="../web/story-animation.js?scroll-timeline=3"></script>
 <script src="../web/eligibility-display.js"></script>
 <script src="../web/stories.js"></script>
@@ -41,6 +44,66 @@ const assert = {
   },
 };
 const display = EligibilityDisplay;
+test('desktop pinch batches transforms, preserves the cursor anchor, and redraws only on release', () => {
+  const container = document.createElement('div');
+  container.style.cssText = 'position:fixed;left:0;top:0;width:400px;height:300px;visibility:hidden';
+  document.body.append(container);
+  const map = L.map(container, {zoomAnimation:false, scrollWheelZoom:false, zoomSnap:.25,
+    minZoom:6, maxZoom:19}).setView([44,-72.5],8);
+  const polygon = L.polygon([[43.9,-72.6],[44.1,-72.6],[44.1,-72.4]]).addTo(map);
+  let frame, timer, scheduled = 0, projections = 0;
+  const project = polygon._project;
+  polygon._project = function() { projections++; return project.call(this); };
+  const controller = MapInteractions.trackpadZoom(map, {
+    touchPoints:0, requestFrame:fn => {frame=fn; scheduled++; return scheduled;},
+    cancelFrame:() => {frame=null;}, setTimer:fn => {timer=fn; return 1;}, clearTimer:() => {timer=null;},
+  });
+  const point = L.point(275,110);
+  const anchor = map.containerPointToLatLng(point);
+  const wheel = (deltaY, ctrlKey=true) => {
+    const event = new WheelEvent('wheel', {clientX:point.x, clientY:point.y, deltaY, ctrlKey, cancelable:true});
+    container.dispatchEvent(event); return event;
+  };
+  try {
+    for (let i=0; i<8; i++) assert.equal(wheel(-1).defaultPrevented, true);
+    assert.equal(scheduled,1);
+    frame();
+    assert.equal(Math.abs(map.getZoom()-(8+8/60)) < 1e-10, true);
+    assert.equal(projections,0);
+    assert.equal(map.latLngToContainerPoint(anchor).distanceTo(point) <= 1, true);
+    timer();
+    assert.equal(map.getZoom(),8.25);
+    assert.equal(projections > 0,true);
+    assert.equal(controller.isActive(),false);
+    assert.equal(map.latLngToContainerPoint(anchor).distanceTo(point) <= 1,true);
+    wheel(-1); frame();
+    assert.equal(wheel(1,false).defaultPrevented,false);
+    assert.equal(controller.isActive(),false);
+    wheel(-100000); frame(); assert.equal(map.getZoom(),19); controller.finish();
+    wheel(100000); frame(); assert.equal(map.getZoom(),6); controller.finish();
+    const gesture = (type, scale=1) => {
+      const event = new MouseEvent(type,{clientX:point.x,clientY:point.y,cancelable:true});
+      Object.defineProperty(event,'scale',{value:scale}); container.dispatchEvent(event);
+    };
+    gesture('gesturestart'); gesture('gesturechange',1.1); frame();
+    assert.equal(Math.abs(map.getZoom()-(6+Math.log2(1.1))) < 1e-10,true);
+    const before = map.getZoom(); wheel(-10); assert.equal(map.getZoom(),before);
+    gesture('gestureend'); assert.equal(map.getZoom(),6.25);
+    wheel(-1); document.dispatchEvent(new Event('pointerdown'));
+    assert.equal(controller.isActive(),false); assert.equal(frame,null);
+    controller.finish();
+  } finally {controller.destroy(); map.remove(); container.remove();}
+});
+test('touch devices leave native Safari pinch gestures untouched', () => {
+  const container = document.createElement('div');
+  const controller = MapInteractions.trackpadZoom({getContainer:()=>container}, {touchPoints:5});
+  try {
+    const event = new Event('gesturestart',{cancelable:true});
+    container.dispatchEvent(event);
+    assert.equal(event.defaultPrevented,false);
+    assert.equal(controller.isActive(),false);
+  } finally {controller.destroy();}
+});
 const {compile, player, timing} = window.MapStoryAnimation;
 test('active story has independent chapters and reversible polygon visibility', () => {
   const context = {housingData: {municipalities: []}, colors: {

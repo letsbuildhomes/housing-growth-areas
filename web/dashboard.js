@@ -132,32 +132,20 @@
         L.Tooltip.prototype._setPosition.call(this, position);
       },
     });
-    const hoverTooltip = content => new HoverTooltip().setContent(content);
-    map.attributionControl.setPrefix(false);
-    // Trackpad pinches zoom the map, not the page; plain wheel scrolling still drives the story.
-    // Chromium/Firefox trackpads report ctrl+wheel; desktop Safari sends gestures.
-    // Touchscreens use Leaflet's native touch zoom, which transforms existing
-    // vectors during the pinch instead of reprojecting them on every event.
-    let pinchZoom = null, pinchTimer = null, gestureZoom = null;
-    const zoomAt = (event, zoom) => map.setZoomAround(map.mouseEventToContainerPoint(event),
-      Math.max(map.getMinZoom(), Math.min(map.getMaxZoom(), zoom)), {animate: false});
-    map.getContainer().addEventListener('wheel', event => {
-      if (!event.ctrlKey || gestureZoom !== null) return;
-      event.preventDefault();
-      pinchZoom = Math.max(map.getMinZoom(), Math.min(map.getMaxZoom(), (pinchZoom ?? map.getZoom()) - event.deltaY / 60));
-      zoomAt(event, pinchZoom);
-      clearTimeout(pinchTimer);
-      pinchTimer = setTimeout(() => {pinchZoom = null;}, 250);
-    }, {passive: false});
-    if (!navigator.maxTouchPoints) {
-      map.getContainer().addEventListener('gesturestart', event => {event.preventDefault(); gestureZoom = map.getZoom();});
-      map.getContainer().addEventListener('gesturechange', event => {
-        if (gestureZoom === null) return;
-        event.preventDefault();
-        zoomAt(event, gestureZoom + Math.log2(event.scale));
-      });
-      map.getContainer().addEventListener('gestureend', event => {event.preventDefault(); gestureZoom = null;});
+    const hoverBox = new HoverTooltip();
+    const hoverTargets = new WeakMap();
+    let activeHover = null, mapMoving = false;
+    function registerHover(layer, content, kind) {
+      const register = () => {
+        const element = layer.getElement();
+        if (element) hoverTargets.set(element, {layer, content, kind});
+      };
+      layer.on('add', register);
+      layer.on('remove', () => { if (activeHover === layer) clearHover(); });
+      register();
     }
+    map.attributionControl.setPrefix(false);
+    const trackpad = MapInteractions.trackpadZoom(map);
     // Leaflet ends a drag only on mouseup, which is lost when the button is released outside
     // the map or window. Supply that mouseup once the pointer leaves the map's bounds or the
     // window, the window loses focus, or the pointer returns with no button held.
@@ -192,7 +180,7 @@
       interactive: townHover,
       style: feature => ({color: '#536c70', weight: 1, opacity: 0.85,
         fillColor: '#788992', fillOpacity: 0}),
-      onEachFeature: (feature, layer) => townHover && layer.bindTooltip(hoverTooltip(() => municipalityTooltip(feature.properties))),
+      onEachFeature: (feature, layer) => townHover && registerHover(layer, () => municipalityTooltip(feature.properties), 'town'),
     }).addTo(map);
     map.createPane('rpcBoundaries');
     map.getPane('rpcBoundaries').style.zIndex = 450;
@@ -208,7 +196,7 @@
       style: feature => ({color: areaColor(feature.properties.likely_eligible), weight: 1.2,
         opacity: 0.9, fillColor: areaColor(feature.properties.likely_eligible), fillOpacity: 0.42}),
       onEachFeature: (feature, layer) => {
-        layer.bindTooltip(hoverTooltip(() => areaTooltip(feature.properties)));
+        registerHover(layer, () => areaTooltip(feature.properties), 'area');
       }
     });
     const {positive: good, negative: bad, unknown: muted, absent} = mapColors;
@@ -220,8 +208,8 @@
       style: {color: tierColor, fillColor: tierColor, weight: 1.2, opacity: 0, fillOpacity: 0},
       onEachFeature: (feature, layer) => {
         const p = feature.properties;
-        layer.bindTooltip(hoverTooltip(() => `${placeHeading(p.municipality, p.rpc)}
-          <div class="area-hover-type">Tier 1B</div>${stageLine(p.map_stage)}`));
+        registerHover(layer, () => `${placeHeading(p.municipality, p.rpc)}
+          <div class="area-hover-type">Tier 1B</div>${stageLine(p.map_stage)}`, 'tier');
       },
     });
     map.createPane('housingGrowth').style.zIndex = 441;
@@ -256,7 +244,7 @@
       style: {color: good, fillColor: good, weight: 1, opacity: 0, fillOpacity: 0},
       onEachFeature: (feature, layer) => {
         if (kind !== 'housing-block') {
-          layer.bindTooltip(hoverTooltip(() => housingTooltip(kind, feature.properties)));
+          registerHover(layer, () => housingTooltip(kind, feature.properties), kind);
         }
       },
     })}));
@@ -289,7 +277,6 @@
         layer.addTo(map);
         storyOrderChanged = true;
       } else if (!visible && map.hasLayer(layer)) {
-        layer.closeTooltip();
         map.removeLayer(layer);
       }
     };
@@ -326,21 +313,36 @@
         || (candidates.length === 1 ? candidates[0] : null);
     };
     function clearHover() {
+      activeHover = null;
+      hoverBox.close();
       setTint(null);
-      [areaLayer, tierLayer, townLayer, ...housingLayers.map(({layer}) => layer)]
-        .forEach(collection => collection.eachLayer(layer => layer.closeTooltip()));
     }
-    // A drag or zoom starts from a clean slate; CSS disables polygon hover while dragging,
-    // so Leaflet never queues a tooltip to open where the drag ends.
-    map.on('dragstart zoomstart', clearHover);
-    const hoverTint = layer => layer.on({mouseover: () => setTint(layer), mouseout: () => setTint(null)});
-    if (townHover) townLayer.eachLayer(hoverTint);
-    [areaLayer, tierLayer].forEach(collection => collection.eachLayer(hoverTint));
-    housingLayers.forEach(({kind, layer: collection}) => {
-      if (kind === 'housing-coverage') collection.eachLayer(hoverTint);
-      if (kind === 'housing-category') collection.eachLayer(layer => layer.on({
-        mousemove: event => setTint(blockAt(event.latlng, layer.feature.properties)), mouseout: () => setTint(null)}));
+    map.on('movestart zoomstart', () => { mapMoving = true; clearHover(); });
+    map.on('moveend', () => { mapMoving = false; });
+    function followPointer(event) {
+      if (mapMoving || dragArmed || event.buttons || trackpad.isActive()) { clearHover(); return; }
+      // Hit-test the actual pointer position, including cards and controls above the map.
+      const target = document.elementFromPoint(event.clientX, event.clientY);
+      const hovered = target && hoverTargets.get(target);
+      if (!hovered || !map.hasLayer(hovered.layer)) { clearHover(); return; }
+      const latlng = map.mouseEventToLatLng(event);
+      if (activeHover !== hovered.layer) {
+        activeHover = hovered.layer;
+        hoverBox.setContent(hovered.content());
+      }
+      setTint(hovered.kind === 'housing-category' ? blockAt(latlng, hovered.layer.feature.properties) : hovered.layer);
+      hoverBox.setLatLng(latlng).openOn(map);
+    }
+    const mapContainer = map.getContainer();
+    mapContainer.addEventListener('pointermove', event => {
+      if (event.pointerType === 'touch') clearHover();
+      else followPointer(event);
     });
+    // Preserve tap-to-inspect on phones without leaving boxes open during a drag.
+    mapContainer.addEventListener('pointerup', event => { if (event.pointerType === 'touch') followPointer(event); });
+    mapContainer.addEventListener('pointerdown', clearHover);
+    mapContainer.addEventListener('pointerleave', clearHover);
+    window.addEventListener('blur', clearHover);
     let focusRpc = null;
     const townRpcs = new Map(mapData.towns.features.map(f => [f.properties.geoid, f.properties.focus_rpc]));
     // Step keys count municipalities by default, or Housing Growth Areas when a step asks.
@@ -404,7 +406,6 @@
           paint(item.layer);
           if (item.kind !== 'town') {
             item.layer.getElement()?.classList.toggle('story-area-hidden', item.style.opacity === 0);
-            if (item.style.opacity === 0) item.layer.closeTooltip();
           }
         });
         restoreStoryOrder();
@@ -614,6 +615,7 @@
       }
     });
     function fitVermont(animate = false) {
+      trackpad.finish();
       map.stop();
       map.invalidateSize();
       const zone = mapZone.getBoundingClientRect();

@@ -175,7 +175,8 @@ municipalities are unfilled. An `areaKey` entry of `[color, label, 'outline']` d
 an outline swatch.
 Steps marked `municipalFill: true` limit hover to municipalities; other steps
 limit hover to area polygons. The hovered polygon's fill darkens slightly; over
-category polygons, the whole Housing Growth Area under the pointer is shaded. Dragging
+category polygons, the whole Housing Growth Area under the pointer is shaded. One shared
+hover card follows the pointer; entering controls or leaving the map closes it. Dragging
 or zooming clears hover, and polygons ignore hover mid-drag. A drag ends when the
 pointer leaves the map or window, so a release outside it is never lost. Leaflet's SVG renderers
 draw polygons half a view beyond each edge (`padding: 0.5`), so short drags reveal
@@ -226,7 +227,11 @@ Desktop fitting uses the map zone's actual bounds, with 32px outer margins and
 space reserved for Focus at its top center, with a downward-opening menu. The
 horizontal −/+ zoom pill sits beside Focus in a centered group with a 16px gap;
 both pills are 38px tall. Zoom changes by half a level. Trackpad pinches zoom the map rather than the page;
-plain wheel scrolling still advances the story. Touchscreen pinches use Leaflet's
+plain wheel scrolling still advances the story. Desktop pinches batch input into one
+transform per animation frame, preserving the point beneath the cursor. Geometry is
+redrawn and zoom snaps to a quarter level only when the gesture ends. This uses the
+vendored Leaflet touch-zoom internals; check browser regressions when upgrading Leaflet.
+Touchscreen pinches use Leaflet's
 native touch zoom; custom Safari gesture handling is reserved for devices without
 touch points so it does not compete with native pinching on iPhone/iPad.
 The vertical timeline occupies a separate right-hand strip beyond the cards;
