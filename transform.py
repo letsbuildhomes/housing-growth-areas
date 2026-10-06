@@ -485,14 +485,14 @@ def derive_tier_municipal(con, input_data=None):
     return {**stamp,'selected_stages':selected,'areas':{'type':'FeatureCollection','features':features},'audit':audit}
 
 
-def prepare_tier(db_path=DB_PATH, output=None):
+def prepare_tier(db_path=DB_PATH, output=None, force=False):
     output=Path(output) if output else Path(db_path).parent/'tier1b-municipal.json'
     if not Path(db_path).is_file(): raise ValueError('Restore the saved database first')
     with duckdb.connect(str(db_path),read_only=True) as con:
         con.execute('LOAD spatial')
         con.execute('BEGIN TRANSACTION')
         stamp,_,_=tier_inputs(con)
-        if output.is_file():
+        if output.is_file() and not force:
             saved=json.loads(output.read_text())
             if all(saved.get(k)==v for k,v in stamp.items()):
                 return
@@ -859,7 +859,7 @@ def load_housing_growth(con, path=config.HOUSING_PATH):
     return document
 
 
-def prepare_housing_growth(db_path=DB_PATH, output=None):
+def prepare_housing_growth(db_path=DB_PATH, output=None, force=False):
     output = Path(output) if output else Path(db_path).parent/'housing-growth.json'
     if not Path(db_path).is_file():
         raise ValueError('Restore the saved database first')
@@ -867,7 +867,7 @@ def prepare_housing_growth(db_path=DB_PATH, output=None):
         con.execute('LOAD spatial')
         con.execute('BEGIN TRANSACTION')
         stamp,_,_ = housing_inputs(con)
-        if output.is_file():
+        if output.is_file() and not force:
             saved = json.loads(output.read_text())
             if all(saved.get(k)==v for k,v in stamp.items()):
                 return
@@ -884,12 +884,13 @@ def main():
     source.add_argument('--prepare', action='store_true', help='Prepare relationships from the existing read-only database')
     parser.add_argument('--db', type=Path, default=DB_PATH)
     parser.add_argument('--memberships', type=Path, default=MEMBERSHIP_PATH)
+    parser.add_argument('--force', action='store_true', help='Recompute spatial sidecars even when input fingerprints match')
     args = parser.parse_args()
     if args.snapshot:
         load_snapshot(args.snapshot, args.db)
     prepare(args.db, args.memberships)
-    prepare_tier(args.db)
-    prepare_housing_growth(args.db)
+    prepare_tier(args.db, force=args.force)
+    prepare_housing_growth(args.db, force=args.force)
 
 
 if __name__ == '__main__':

@@ -10,6 +10,30 @@ import duckdb
 import transform
 
 
+class PreparationForceTests(unittest.TestCase):
+    def test_force_bypasses_spatial_fingerprint_shortcuts(self):
+        with tempfile.TemporaryDirectory() as folder:
+            db = Path(folder) / 'saved.duckdb'
+            db.touch()
+            output = Path(folder) / 'prepared.json'
+            stamp = {'schema_version': 1, 'snapshot_id': 'same'}
+            for prepare, inputs, derive, document in (
+                (transform.prepare_tier, 'tier_inputs', 'derive_tier_municipal',
+                 {**stamp, 'areas': {'features': []}}),
+                (transform.prepare_housing_growth, 'housing_inputs', 'derive_housing_growth',
+                 {**stamp, 'blocks': {'features': []}}),
+            ):
+                output.write_text(json.dumps(stamp))
+                with patch.object(transform.duckdb, 'connect'), \
+                     patch.object(transform, inputs, return_value=(stamp, [], [])), \
+                     patch.object(transform, derive, return_value=document) as compute:
+                    prepare(db, output)
+                    compute.assert_not_called()
+                    prepare(db, output, force=True)
+                    compute.assert_called_once()
+                self.assertEqual(json.loads(output.read_text()), document)
+
+
 class HousingGeometryTests(unittest.TestCase):
     def setUp(self):
         self.con = duckdb.connect()

@@ -255,7 +255,18 @@ See [municipality decisions](#municipality-decisions) below.
 table. `make prepare` (also a dependency of build/export/analyze) reads the saved
 database and writes it without reloading source data. Snapshot transformation
 also prepares it. It can be regenerated; raw snapshots and DuckDB are unchanged
-by preparation. The current file schema is version 1:
+by preparation.
+
+Build incrementality, October 6, 2026: GNU Make tracks the saved database,
+preparation/export code, configuration, and dependency files by modification
+time. Sidecars and exports are grouped file targets; unchanged builds skip
+their recipes. When preparation is required, Make forces spatial recomputation
+and touches all successfully prepared sidecars, including unchanged membership
+content, so newer prerequisites do not cause repeated preparation. Existing
+provenance checks and export publication remain in place. `make page` consumes
+existing exports only; `make -B build` forces the complete offline build.
+
+The current file schema is version 1:
 
 | Field | Meaning |
 |---|---|

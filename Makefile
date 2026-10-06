@@ -1,11 +1,12 @@
 UV = uv run python3
-PORT ?= 8000
-HOST ?= 127.0.0.1
+PORT ?= 18000
+HOST ?= 0.0.0.0
 WORKERS ?= 4
 SNAPSHOT ?=
 VIBES_PROJECT := housing-growth-areas
 
 .DEFAULT_GOAL := build
+.DELETE_ON_ERROR:
 .PHONY: all build export prepare ingest extract transform analyze page status clean rebuild serve deploy test help setup-spatial
 
 all: build
@@ -14,25 +15,41 @@ all: build
 build: export
 	$(MAKE) page
 
-export: prepare
+DEPENDENCIES = pyproject.toml uv.lock Makefile
+PREPARED = data/municipality-memberships.json data/tier1b-municipal.json data/housing-growth.json
+EXPORTS = out/dashboard/data/manifest.json out/dashboard/data/interim-areas.json out/dashboard/data/map.json out/dashboard/data/tier1b.json out/dashboard/data/housing-growth.json
+
+export: $(EXPORTS)
+
+prepare: $(PREPARED)
+
+$(PREPARED) &: data/act181_ingest.duckdb transform.py config.py arcgis.py $(DEPENDENCIES)
+	$(UV) transform.py --prepare --force
+	@touch $(PREPARED)
+
+# A standalone page rebuild consumes existing exports only.
+ifneq ($(strip $(filter all build export analyze serve deploy rebuild $(EXPORTS),$(MAKECMDGOALS))),)
+GENERATE_EXPORTS = yes
+endif
+ifeq ($(MAKECMDGOALS),)
+GENERATE_EXPORTS = yes
+endif
+ifeq ($(GENERATE_EXPORTS),yes)
+$(EXPORTS) &: $(PREPARED) data/act181_ingest.duckdb analyze.py transform.py config.py arcgis.py $(DEPENDENCIES)
 	$(UV) analyze.py --export
+endif
 
-prepare:
-	$(UV) transform.py --prepare
-
-analyze: prepare
-	$(UV) analyze.py
+analyze: build
 
 page: out/dashboard/index.html
 
-PAGE_INPUTS = analyze.py config.py $(wildcard web/*.html web/*.css web/*.js web/assets/* web/vendor/*)
-out/dashboard/index.html: $(PAGE_INPUTS) out/dashboard/data/manifest.json out/dashboard/data/interim-areas.json out/dashboard/data/map.json out/dashboard/data/tier1b.json out/dashboard/data/housing-growth.json
+PAGE_INPUTS = analyze.py config.py $(DEPENDENCIES) $(wildcard web/*.html web/*.css web/*.js web/assets/* web/vendor/*)
+out/dashboard/index.html: $(PAGE_INPUTS) $(EXPORTS)
 	$(UV) analyze.py --page
 
 # Missing exports are an error, never an implicit fetch or database load.
 out/dashboard/data/%.json:
-	@echo 'Missing exports. Run make export or make build.' >&2
-	@exit 1
+	@test -f "$@" || { echo 'Missing exports. Run make export or make build.' >&2; exit 1; }
 
 # Explicit network operations, never prerequisites of local build targets.
 extract:

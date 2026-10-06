@@ -5,7 +5,7 @@ tier designations. The output is a standalone map and table dashboard.
 
 ## Run
 
-Requires Python 3.9+, `uv`, and `make`. No Node, npm, or frontend build tool is needed.
+Requires Python 3.9+, `uv`, and GNU Make 4.3+ (grouped output targets). No Node, npm, or frontend build tool is needed.
 
 ```sh
 uv sync --locked
@@ -26,7 +26,7 @@ Missing data produces an error; it never triggers acquisition or sample data.
 | `make transform SNAPSHOT=in/snapshots/<capture>` | Load that completed snapshot offline and prepare relationships. |
 | `make ingest` | **Network:** capture, load, and prepare in sequence. |
 | `make page` | Rebuild HTML only when its source files or exports changed. |
-| `make export` / `make prepare` | Regenerate JSON exports / derived membership and geometry sidecars. |
+| `make export` / `make prepare` | Update JSON exports / derived membership and geometry sidecars when their inputs changed. |
 | `make status` | Show saved capture coverage and quality flags. |
 | `make serve PORT=8001` | Build and preview on a chosen port. |
 | `make deploy` | Build from saved data and publish the dashboard to vibes. |
@@ -36,6 +36,15 @@ Missing data produces an error; it never triggers acquisition or sample data.
 `WORKERS=1` through `8` controls capture concurrency (default 4). `HOST` controls
 preview binding (default `127.0.0.1`). Use `make help` or a script's `--help` for
 options. Reuse an existing preview server; after source edits, rebuild and reload.
+Make uses file modification times: unchanged builds skip preparation, exports,
+and HTML. Database, preparation code, configuration, dependency files, and the
+Makefile invalidate sidecars; export code also invalidates exports. Changes under
+`web/` rebuild HTML only. Missing members of an output group regenerate the whole
+group once, including with `make -j`. `make page` requires existing exports and
+never prepares or exports data. Use `make -B build` to force every build stage;
+Make bypasses spatial fingerprint shortcuts when preparation runs. Direct Python
+commands do not use Make's timestamps; spatial preparation retains its fingerprint
+shortcuts unless `transform.py --prepare --force` is requested.
 Run `make build`, then upload the contents of `out/dashboard/` to your website
 directory, keeping `index.html` and its `data/` folder together. Paths are relative,
 so publishing in a subdirectory works. CSS, JavaScript, and the logo remain embedded;
