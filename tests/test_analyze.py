@@ -44,6 +44,46 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(result, geometry)
         self.assertEqual(audit['feature_fallback'], 'operation_error')
 
+    def display(self, *wkt):
+        """Features in EPSG:32145 meters, exported as WGS84 GeoJSON."""
+        from analyze import reduce_display_dataset
+        with duckdb.connect(':memory:') as con:
+            con.execute('LOAD spatial')
+            features = [{'type': 'Feature', 'id': str(i), 'properties': {'area_m2': 1.23456789},
+                         'geometry': json.loads(con.execute("""SELECT ST_AsGeoJSON(ST_Transform(ST_GeomFromText(?),
+                             'EPSG:32145','EPSG:4326',always_xy:=true))""", [shape]).fetchone()[0]) if shape else None}
+                        for i, shape in enumerate(wkt)]
+            dataset = {'areas': {'type': 'FeatureCollection', 'features': features}}
+            reduce_display_dataset(con, dataset)
+        return dataset
+
+    def test_display_precision_snaps_to_grid_and_records_rules(self):
+        dataset = self.display('POLYGON((500000 200000,500300 200000,500300 200200,500000 200200,500000 200000))', None)
+        snapped, missing = dataset['areas']['features']
+        coordinates = [c for ring in snapped['geometry']['coordinates'] for point in ring for c in point]
+        self.assertTrue(all(c == round(c, 5) for c in coordinates))
+        self.assertEqual(snapped['properties']['area_m2'], 1.23456789)
+        self.assertIsNone(missing['geometry'])
+        self.assertEqual(dataset['display_precision']['rules']['grid_degrees'], 0.00001)
+        self.assertEqual(dataset['display_precision']['changes'], {})
+
+    def test_display_precision_collapses_hairlines_and_records_changes(self):
+        # A 0.2 m strip collapses; a 0.2 m neck splits a feature into two parts.
+        dataset = self.display('POLYGON((500000 200000,500300 200000,500300 200000.2,500000 200000.2,500000 200000))',
+                               'POLYGON((500000 200000,500100 200000,500100 200050,500200 200050,500200 200000,'
+                               '500300 200000,500300 200050.2,500000 200050.2,500000 200000))')
+        strip, neck = dataset['areas']['features']
+        changes = dataset['display_precision']['changes']
+        self.assertIsNone(strip['geometry'])
+        self.assertAlmostEqual(changes['areas:0']['collapsed_area_m2'], 60, delta=0.1)
+        self.assertEqual(changes['areas:1'], {'parts': [1, 2], 'holes': [0, 0]})
+
+    def test_display_precision_guard_fails_export(self):
+        from unittest.mock import patch
+        with patch.dict('analyze.DISPLAY_PRECISION', max_vertex_shift_m=0.001):
+            with self.assertRaisesRegex(ValueError, 'areas:0: Display precision exceeded'):
+                self.display('POLYGON((500000 200000,500300 200000,500300 200200,500000 200200,500000 200000))')
+
     def test_story_towns_use_membership_despite_neighboring_geometry(self):
         with duckdb.connect(':memory:') as con:
             con.execute('LOAD spatial')

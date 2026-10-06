@@ -3,6 +3,7 @@ import argparse
 import base64
 from datetime import datetime, timezone
 import json
+import math
 from pathlib import Path
 import tempfile
 
@@ -202,6 +203,72 @@ def simplify_display_geometry(con, geometry):
     return geometry, audit
 
 
+DISPLAY_PRECISION = {'version': 2, 'grid_degrees': 0.00001, 'crs': 'EPSG:32145',
+                     'max_vertex_shift_m': 1.0, 'max_changed_width_m': 2.0}
+
+
+def reduce_display_geometry(con, geometry):
+    """Snap a display copy to the coordinate grid with GEOS snap-rounding.
+
+    Output is always valid: features narrower than about one grid cell collapse
+    instead of crossing. Guards measured in meters fail the export if any vertex
+    moves beyond `max_vertex_shift_m` or any added or removed piece is at least
+    `max_changed_width_m` wide. Returns the geometry (None if it collapsed) and
+    an audit of collapses and part/hole count changes (None when unchanged).
+    """
+    if geometry is None:
+        return None, None
+    rules = DISPLAY_PRECISION
+    valid, empty, encoded, area, parts, reduced_parts, holes, reduced_holes, shift, narrow = con.execute('''
+        WITH a AS (SELECT ST_GeomFromGeoJSON(?) o),
+        b AS (SELECT o,ST_ReducePrecision(o,?) r FROM a),
+        m AS (SELECT o,r,ST_Transform(o,'EPSG:4326',?,always_xy:=true) om,
+                     ST_Transform(r,'EPSG:4326',?,always_xy:=true) rm FROM b)
+        SELECT ST_IsValid(r),ST_IsEmpty(r),ST_AsGeoJSON(r),ST_Area(om),
+            len(ST_Dump(o)),len(ST_Dump(r)),
+            (SELECT COALESCE(sum(ST_NumInteriorRings(p.geom)),0) FROM unnest(ST_Dump(o)) t(p)),
+            (SELECT COALESCE(sum(ST_NumInteriorRings(p.geom)),0) FROM unnest(ST_Dump(r)) t(p)),
+            (SELECT COALESCE(max(ST_Distance(p.geom,ST_Boundary(om))),0) FROM unnest(ST_Dump(ST_Points(rm))) t(p)),
+            (SELECT COALESCE(bool_and(ST_IsEmpty(ST_Buffer(p.geom,?))),true)
+             FROM unnest(ST_Dump(ST_CollectionExtract(ST_SymDifference(om,rm),3))) t(p))
+        FROM m''', [json.dumps(geometry), rules['grid_degrees'], rules['crs'], rules['crs'],
+                    -rules['max_changed_width_m']/2]).fetchone()
+    if not (valid or empty) or shift > rules['max_vertex_shift_m'] or not narrow:
+        raise ValueError(f'Display precision exceeded its guards (valid={valid}, '
+                         f'shift={shift:.3f} m, narrow_changes={narrow})')
+    if empty:
+        return None, {'collapsed_area_m2': area}
+    decimals = round(-math.log10(rules['grid_degrees']))
+    def snapped(value):
+        # Drop float noise from the snapped decimal values; never moves a vertex.
+        return round(value, decimals) if isinstance(value, float) else [snapped(v) for v in value]
+    result = json.loads(encoded)
+    if result['type'] not in ('Polygon', 'MultiPolygon'):
+        raise ValueError(f'Display precision produced {result["type"]}')
+    result['coordinates'] = snapped(result['coordinates'])
+    changed = (parts, holes) != (reduced_parts, reduced_holes)
+    return result, ({'parts': [parts, reduced_parts], 'holes': [holes, reduced_holes]} if changed else None)
+
+
+def reduce_display_dataset(con, dataset):
+    """Snap every feature collection in an export and record collapses and topology changes."""
+    changes = {}
+    collections = {key: value for key, value in dataset.items()
+                   if isinstance(value, dict) and value.get('type') == 'FeatureCollection'}
+    for key, collection in collections.items():
+        for feature in collection['features']:
+            try:
+                feature['geometry'], audit = reduce_display_geometry(con, feature['geometry'])
+            except ValueError as error:
+                raise ValueError(f'{key}:{feature["id"]}: {error}') from error
+            if audit:
+                changes[f'{key}:{feature["id"]}'] = audit
+    if collections:
+        dataset['display_precision'] = {'rules': DISPLAY_PRECISION, 'engine': 'DuckDB ' + duckdb.__version__,
+                                        'changes': changes}
+    return dataset
+
+
 def export_tier1b(con):
     """Publish the selected municipal stages from the validated prepared sidecar."""
     from transform import tier_inputs
@@ -335,7 +402,7 @@ def export_all(db_path=DB_PATH, output=EXPORT_DIR, memberships_path=MEMBERSHIP_P
                   'captured_at': run[1].replace(' ', 'T') + 'Z',
                   'exported_at': datetime.now(timezone.utc).isoformat()}
         memberships = load_prepared(con, memberships_path)
-        datasets = {name: {**common, **(fn(con, memberships) if fn is export_map else fn(con))}
+        datasets = {name: reduce_display_dataset(con, {**common, **(fn(con, memberships) if fn is export_map else fn(con))})
                     for name, fn in EXPORTERS.items()}
         con.execute('COMMIT')
     # Finish every query before publishing any new export.

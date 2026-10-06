@@ -97,7 +97,8 @@ class PipelineTests(unittest.TestCase):
                             [geoid,name,name,geoid,wgs(rectangle(x,150000,x+1000,151000))])
             for fid,stage,shape in [('spill','approved',rectangle(400800,150200,401050,150400)),
                                     ('cross','application',rectangle(400800,150500,401200,150700)),
-                                    ('tiny','approved',rectangle(400200,150200,400200.5,150200.5))]:
+                                    ('tiny','approved',rectangle(400200,150200,400200.5,150200.5)),
+                                    ('strip','approved',rectangle(400300,150600,400700,150601.5))]:
                 con.execute('''INSERT INTO map_features (run_id,feature_id,layer_id,rpc,map_stage,kind,tier_code,geom)
                     VALUES ('capture',?,'layer','RR',?,'tier','1B',ST_GeomFromWKB(?))''',[fid,stage,wgs(shape)])
             doc=transform.derive_tier_municipal(con)
@@ -106,7 +107,11 @@ class PipelineTests(unittest.TestCase):
                              [('East','application'),('West','application'),('West','approved')])
             approved=next(f for f in fs if f['properties']['map_stage']=='approved')
             self.assertAlmostEqual(approved['properties']['area_before_closing_m2'],50000,places=2)
-            self.assertTrue(any(x['operation']=='input' and x['area_m2']<1 for x in doc['audit']['removed_parts']))
+            self.assertTrue(any(x['operation']=='input' and x['area_m2']<1 and x['reason']=='area'
+                                for x in doc['audit']['removed_parts']))
+            # A 400 m strip passes the area minimum but is narrower than 2 m.
+            self.assertTrue(any(x['operation']=='input' and abs(x['area_m2']-600)<0.01 and x['reason']=='width'
+                                for x in doc['audit']['removed_parts']))
             self.assertEqual(doc,transform.derive_tier_municipal(con))
 
     def test_offline_entrypoint_and_capture_only(self):

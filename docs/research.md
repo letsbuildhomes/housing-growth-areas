@@ -569,6 +569,33 @@ version, and fallback provenance (zero-based part indices). Detailed sidecar
 geometry and all area/status/membership properties remain authoritative and
 unchanged. Current export: 3.84 MB, 23 part fallbacks, no whole-feature fallbacks.
 
+Display coordinate grid (October 6, 2026): coordinates had 12–15 decimals and
+made up about 22 MB of the 26 MB of JSON. After simplification, every exported
+feature collection (`map.json`, `tier1b.json`, `housing-growth.json`) is snapped
+to a 0.00001° grid (about 0.8 × 1.1 m) with `ST_ReducePrecision`. GEOS
+snap-rounding always returns valid geometry. Necks, holes, and parts narrower
+than about one grid cell collapse instead of crossing. Two guards, measured in
+EPSG:32145, fail the export if any snapped vertex lies more than 1 m from the
+original outline, or if any added or removed piece survives a 1 m inward buffer
+(that is, is 2 m or wider). Exports keep their schema versions and add
+`display_precision` rules, engine, and `changes`: part/hole counts before and
+after, or `collapsed_area_m2` when a feature's display geometry becomes `null`.
+Properties are unchanged.
+
+A first attempt the same day rounded to 6 decimals and kept finer precision
+for parts that rounding invalidated. It left 2.3 MB (Brotli), and its
+invalid parts traced to sub-metre necks, not to real map features. An audit of
+the 5-decimal grid on that pre-rounding export bounded every change. No snapped
+outline point is more than 0.68 m from the original. The 104 removed parts are
+at most 1.23 m wide, the 47 filled holes at most 1.46 m wide, and the 73 neck
+splits at most 1.0 m wide. Edge displacement averages 0.19 m regardless of
+feature size.
+
+Recorded after the 2 m width rule below: 0 collapsed features; 85 features
+changed part or hole counts (3 map, 7 Tier 1B, 75 housing). Every coordinate is
+on the grid. Uncompressed JSON is 13.1 MB (was 26.3), gzip 2.8 MB (was 9.3),
+and Brotli 1.13 MB (was 5.6).
+
 `make prepare` also regenerates `data/tier1b-municipal.json` from all three
 original Tier 1B stages, reading the ingest database without changing it.
 The sidecar retains all derived municipal stages. The website selects the
@@ -577,7 +604,11 @@ This spatial rule applies only to Tier 1B, not interim municipality memberships.
 
 Geometry is projected to EPSG:32145 meters and repaired in a temporary copy.
 Connected polygon parts smaller than 1 m² are removed before assignment and
-after closing. Holes are not treated as standalone fragments.
+after closing. Holes are not treated as standalone fragments. Since October 6,
+2026 (`TIER_RULES` version 3, `HOUSING_RULES` version 6), parts that vanish
+under a 1 m inward buffer are also removed at both points
+(`minimum_width_m` 2). An area minimum alone kept long hairline strips, such
+as a 400 m × 1 m strip of 400 m². Removed parts record `reason` `area` or `width`.
 A municipality qualifies when a connected intersection reaches its interior
 beyond a 75 m inward boundary band. One qualifying town receives the whole
 source part, including minor border protrusions. Multiple qualifying towns
@@ -955,6 +986,22 @@ uncovered polygon pieces, 18 are specks under 0.01 m² inside tiny blocks or
 touching neighbors at a point, and 4 (10–115 m²) are narrow uncovered areas with
 no wider neighbor. Only 17 blocks remain split for display, so the public
 export's coverage collection is 6.4 MB.
+
+Nearest-piece absorption and minimum width (October 6, 2026): six fully
+covered blocks still published uncovered portions of 0–0.005 m². Separately,
+31 thin pieces stayed unmerged. Some missed a wide neighbor by float noise
+(about 2×10⁻⁸ m), because intersection and difference are separate overlays.
+Others were up to 55 m from any wide piece, touching only other thin pieces. A
+thin piece now joins the kind of the *nearest* wider piece in its block (the
+largest when several touch). Geometry is never moved, so kinds still tile the
+block. The 2 m width rule removed 104 housing parts (2,242 m²; largest 800 m²)
+and 143 Tier 1B parts across all stages (3,145 m²). Blocks dropped from 406 to
+405, removing a 2 m² block (`AC:5000144350:pre_application:2`). Context
+fragments dropped from 19 to 12, and coverage portions from 421 to 414. 27
+blocks changed area by 2,132 m² in total (largest 800.6 m²). No block coverage
+status or municipal outcome changed: 87 all, 13 some, 133 none, 23 no
+included growth areas, and 0 unknown. Tier 1B stage counts and municipality
+memberships are unchanged.
 
 #### Housing Growth Area presentation — October 5, 2026
 

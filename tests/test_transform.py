@@ -229,11 +229,27 @@ class HousingGeometryTests(unittest.TestCase):
         self.assertEqual(block['coverage_status'],'substantial')
 
     def test_hairline_covered_strip_joins_uncovered_portion(self):
-        block,parts=self.coverage(400201)
+        # 3 m: wide enough for the 2 m input rule, narrow enough for sliver absorption.
+        block,parts=self.coverage(400203)
         self.assertEqual(set(parts),{'uncovered'})
         self.assertEqual(block['covered_m2'],0)
-        self.assertAlmostEqual(block['exact_covered_m2'],200,delta=0.01)
+        self.assertAlmostEqual(block['exact_covered_m2'],600,delta=0.01)
         self.assertEqual(block['coverage_status'],'none')
+
+    def test_sliver_chain_joins_nearest_wider_portion(self):
+        # Slivers that touch only each other still join the nearest wide piece:
+        # uncovered 390–393.5, covered 393.5–396.5, uncovered 396.5–400.
+        self.add('housing',self.rectangle(400200,150200,400400,150400))
+        self.add('tier',self.rectangle(400200,150200,400390,150400),'tier')
+        self.add('tier_strip',self.rectangle(400393.5,150200,400396.5,150400),'tier')
+        doc=transform.derive_housing_growth(self.con)
+        self.assertEqual({p['properties']['coverage_kind'] for p in doc['coverage_parts']['features']},{'covered'})
+        self.assertAlmostEqual(doc['blocks']['features'][0]['properties']['exact_covered_m2'],38600,delta=0.01)
+
+    def test_tier_input_narrower_than_minimum_width_is_removed(self):
+        block,parts=self.coverage(400201)
+        self.assertEqual(set(parts),{'uncovered'})
+        self.assertEqual(block['exact_covered_m2'],0)
 
     def test_uncovered_strip_wider_than_sliver_rule_remains_visible(self):
         block,parts=self.coverage(400390)

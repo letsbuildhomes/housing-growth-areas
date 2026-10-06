@@ -397,6 +397,8 @@ def derive_tier_municipal(con, input_data=None):
     band = rules['boundary_band_m']
     radius = rules['closing_radius_m']
     minimum = rules['minimum_part_m2']
+    # A part that vanishes under this inward buffer is narrower than minimum_width_m everywhere.
+    inset = rules['minimum_width_m']/2
     crs = rules['crs']
     con.execute('CREATE OR REPLACE TEMP TABLE tier_towns (geoid VARCHAR, name VARCHAR, g GEOMETRY, core GEOMETRY)')
     for geoid,name,geo in towns:
@@ -423,9 +425,10 @@ def derive_tier_municipal(con, input_data=None):
             audit['unassigned_parts'].append({'source_index':index,'reason':'no polygon geometry after repair'})
         for part_index,(wkb,) in enumerate(parts):
             con.execute('CREATE OR REPLACE TEMP TABLE part AS SELECT ST_GeomFromWKB(?) g',[wkb])
-            area = con.execute('SELECT ST_Area(g) FROM part').fetchone()[0]
-            if area < minimum:
-                audit['removed_parts'].append(dict(source_index=index,part=part_index,area_m2=area,operation='input'))
+            area,thin = con.execute('SELECT ST_Area(g),ST_IsEmpty(ST_Buffer(g,-?)) FROM part',[inset]).fetchone()
+            if area < minimum or thin:
+                audit['removed_parts'].append(dict(source_index=index,part=part_index,area_m2=area,operation='input',
+                                                   reason='area' if area < minimum else 'width'))
                 continue
             # Qualification is per intersected connected component, not touching bounds.
             con.execute('''CREATE OR REPLACE TEMP TABLE qualified AS SELECT DISTINCT t.geoid FROM
@@ -461,11 +464,14 @@ def derive_tier_municipal(con, input_data=None):
         # Closing is not clipped to municipal boundaries: whole-part assignments retain protrusions.
         con.execute('''CREATE OR REPLACE TEMP TABLE closed AS SELECT
             ST_CollectionExtract(ST_MakeValid(ST_Buffer(ST_Buffer(g,?),-?)),3) g FROM merged''',[radius,radius])
-        removed=con.execute('''SELECT ST_Area(piece.geom) FROM closed,unnest(ST_Dump(g)) pieces(piece)
-            WHERE ST_Area(piece.geom)<?''',[minimum]).fetchall()
-        audit['removed_parts'].extend(dict(geoid=geoid,stage=stage,area_m2=a,operation='output') for (a,) in removed)
-        con.execute('''CREATE OR REPLACE TEMP TABLE final_tier AS SELECT ST_Union_Agg(piece.geom) g
-            FROM closed,unnest(ST_Dump(g)) pieces(piece) WHERE ST_Area(piece.geom)>=?''',[minimum])
+        con.execute('''CREATE OR REPLACE TEMP TABLE closed_parts AS SELECT piece.geom g,ST_Area(piece.geom) area,
+            ST_Area(piece.geom)<? OR ST_IsEmpty(ST_Buffer(piece.geom,-?)) removed
+            FROM closed,unnest(ST_Dump(g)) pieces(piece)''',[minimum,inset])
+        removed=con.execute('SELECT area FROM closed_parts WHERE removed ORDER BY area').fetchall()
+        audit['removed_parts'].extend(dict(geoid=geoid,stage=stage,area_m2=a,operation='output',
+                                           reason='area' if a < minimum else 'width') for (a,) in removed)
+        con.execute('''CREATE OR REPLACE TEMP TABLE final_tier AS SELECT ST_Union_Agg(g) g
+            FROM closed_parts WHERE NOT removed''')
         result=con.execute('''SELECT ST_IsValid(g),ST_Area(g),ST_AsGeoJSON(
             ST_Transform(g,?,'EPSG:4326',always_xy:=true)) FROM final_tier''',[crs]).fetchone()
         if result[2] is None:
@@ -580,9 +586,11 @@ def split_housing_block(con, wkb, tier_geo, crs):
 
     Growth and Tier maps trace nearly identical edges, so an exact overlay
     leaves thousands of hairline pieces. Each piece narrower than twice
-    `coverage_sliver_m` joins the kind of its largest wider neighbor (or keeps
-    its own kind without one). Pieces come from one overlay and share exact
-    edges, so the merged kinds still tile the block without subtraction residue.
+    `coverage_sliver_m` joins the kind of its nearest wider piece in the block,
+    the largest one when several touch (or keeps its own kind without one).
+    Intersection and difference are separate overlays, so a sliver can miss its
+    neighbor by float noise, and runs of slivers may touch only each other.
+    Reassigning kinds never moves geometry, so the kinds still tile the block.
     Returns the exact covered area and (kind, area_m2, WGS84 GeoJSON) portions.
     """
     radius = config.HOUSING_RULES['coverage_sliver_m']
@@ -598,8 +606,8 @@ def split_housing_block(con, wkb, tier_geo, crs):
                  UNION ALL SELECT 'uncovered',uncovered FROM overlay),unnest(ST_Dump(shape)) parts(piece)
                 WHERE ST_Area(piece.geom)>0),
             absorbed AS (SELECT p.id,q.exact_kind kind FROM pieces p JOIN pieces q
-                ON p.thin AND NOT q.thin AND ST_Intersects(p.g,q.g)
-                QUALIFY row_number() OVER (PARTITION BY p.id ORDER BY q.area DESC)=1)
+                ON p.thin AND NOT q.thin
+                QUALIFY row_number() OVER (PARTITION BY p.id ORDER BY ST_Distance(p.g,q.g),q.area DESC)=1)
         SELECT exact_kind,COALESCE(a.kind,exact_kind) kind,g FROM pieces LEFT JOIN absorbed a USING(id)''',
         [wkb,tier_geo,crs,radius])
     exact_m2 = con.execute('''SELECT COALESCE(sum(ST_Area(g)),0) FROM block_coverage

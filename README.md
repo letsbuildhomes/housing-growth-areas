@@ -53,7 +53,9 @@ Builds write compact JSON without indentation; enable gzip or Brotli on the web
 server to further reduce download sizes.
 Tier 1B and housing growth display polygons use guarded 0.5 m simplification during export. Detailed
 prepared geometry remains unchanged for analysis; export metadata records the
-rules and automatic fallbacks.
+rules and automatic fallbacks. All exported map geometry is then snapped to a
+0.00001° grid (about 1 m); export fails if snapping moves a vertex more than
+1 m or changes any piece 2 m or wider.
 Preview with `make serve`; opening the HTML directly via `file://` cannot load JSON.
 Polygons and the table work on a local server without internet; optional
 OpenStreetMap tiles need internet.
