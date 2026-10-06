@@ -333,16 +333,7 @@
       setTint(hovered.kind === 'housing-category' ? blockAt(latlng, hovered.layer.feature.properties) : hovered.layer);
       hoverBox.setLatLng(latlng).openOn(map);
     }
-    const mapContainer = map.getContainer();
-    mapContainer.addEventListener('pointermove', event => {
-      if (event.pointerType === 'touch') clearHover();
-      else followPointer(event);
-    });
-    // Preserve tap-to-inspect on phones without leaving boxes open during a drag.
-    mapContainer.addEventListener('pointerup', event => { if (event.pointerType === 'touch') followPointer(event); });
-    mapContainer.addEventListener('pointerdown', clearHover);
-    mapContainer.addEventListener('pointerleave', clearHover);
-    window.addEventListener('blur', clearHover);
+    MapInteractions.pointerHover(map, followPointer, clearHover);
     let focusRpc = null;
     const townRpcs = new Map(mapData.towns.features.map(f => [f.properties.geoid, f.properties.focus_rpc]));
     // Step keys count municipalities by default, or Housing Growth Areas when a step asks.

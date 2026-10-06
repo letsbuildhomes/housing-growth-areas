@@ -104,6 +104,28 @@ test('touch devices leave native Safari pinch gestures untouched', () => {
     assert.equal(controller.isActive(),false);
   } finally {controller.destroy();}
 });
+test('tap cards survive finger release while touch movement and mouse exit clear them', () => {
+  const container = document.createElement('div');
+  const map = new L.Evented();
+  map.getContainer = () => container;
+  let visible = false, followed = null;
+  const hover = MapInteractions.pointerHover(map, event => {visible=true; followed=event;}, () => {visible=false;});
+  const pointer = (type, pointerType) => container.dispatchEvent(new PointerEvent(type, {pointerType}));
+  try {
+    pointer('pointerdown','touch'); pointer('pointerup','touch'); pointer('pointerleave','touch');
+    assert.equal(visible,false);
+    const tap = new MouseEvent('click',{clientX:70,clientY:90});
+    map.fire('click',{originalEvent:tap});
+    pointer('pointerleave','touch');
+    assert.equal(visible,true); assert.equal(followed,tap);
+    pointer('pointerdown','touch'); pointer('pointermove','touch'); pointer('pointerup','touch');
+    assert.equal(visible,false); // A drag has no Leaflet click.
+    pointer('pointermove','mouse'); assert.equal(visible,true);
+    pointer('pointerleave','mouse'); assert.equal(visible,false);
+    map.fire('click',{originalEvent:tap}); window.dispatchEvent(new Event('blur'));
+    assert.equal(visible,false);
+  } finally {hover.destroy();}
+});
 const {compile, player, timing} = window.MapStoryAnimation;
 test('active story has independent chapters and reversible polygon visibility', () => {
   const context = {housingData: {municipalities: []}, colors: {

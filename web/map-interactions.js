@@ -76,5 +76,23 @@
       listeners.forEach(([target, event, handler, options]) => target.removeEventListener(event, handler, options));
     }};
   }
-  window.MapInteractions = {trackpadZoom};
+  function pointerHover(map, followPointer, clearHover) {
+    const container = map.getContainer();
+    // Leaflet emits click only for a tap, after rejecting drags. Touch pointerleave
+    // also fires on finger release, so it must not dismiss the resulting card.
+    const click = event => followPointer(event.originalEvent);
+    const listeners = [
+      [container, 'pointermove', event => event.pointerType === 'touch' ? clearHover() : followPointer(event)],
+      [container, 'pointerdown', clearHover],
+      [container, 'pointerleave', event => { if (event.pointerType !== 'touch') clearHover(); }],
+      [window, 'blur', clearHover],
+    ];
+    map.on('click', click);
+    listeners.forEach(([target, event, handler]) => target.addEventListener(event, handler));
+    return {destroy() {
+      map.off('click', click);
+      listeners.forEach(([target, event, handler]) => target.removeEventListener(event, handler));
+    }};
+  }
+  window.MapInteractions = {trackpadZoom, pointerHover};
 })();
