@@ -54,12 +54,14 @@ test('active story has independent chapters and reversible polygon visibility', 
     style: {color: '#112233', fillColor: '#112233', opacity: 0, fillOpacity: 0}}));
   initial.forEach(item => {item.style = {...item.style, ...story.initial(item)};});
   const timeline = compile(initial, story.groups);
-  // Housing Growth Area outlines show only in the opening chapter; Tier 1B appears
-  // only through green coverage pieces, with no separate outline layer.
+  // Growth blocks stay invisible until hovered; Tier 1B appears only through
+  // coverage pieces, with no separate outline layer.
   assert.deepEqual(timeline.sample(timeline.stops[3]).map(i => i.style.opacity), [0, 0, 0, 0, 0.95]);
   assert.deepEqual(timeline.sample(timeline.stops[2]).map(i => i.style.opacity), [0, 0, 0, 0, 0.95]);
   assert.deepEqual(timeline.sample(timeline.stops[1]).map(i => i.style.opacity), [0, 0, 0.75, 0, 0]);
-  assert.deepEqual(timeline.sample(0).map(i => i.style.opacity), [0, 0, 0.95, 1, 0]);
+  assert.deepEqual(timeline.sample(0).map(i => i.style.opacity), [0, 0, 0.95, 0, 0]);
+  assert.equal(story.steps[0].areaKey.length, 4);
+  assert.equal(story.steps[0].areaKey.some(entry => entry[2] === 'outline'), false);
   // Interim exemption areas belong to the act181 story and are never mounted here.
   assert.deepEqual(story.overlays, ['housing-category', 'housing-block', 'housing-coverage']);
   let rejected = false;

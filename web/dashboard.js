@@ -108,18 +108,36 @@
 
   function initMap() {
     const gain = themeColor('--map-gain');
-    const outline = themeColor('--map-growth-outline');
     const {steps, groups, overlays, initial: initialStyle = () => ({})} = MapStories.create({mapData, tierData, housingData,
-      colors: {...mapColors, gain, outline}, areaColor});
+      colors: {...mapColors, gain}, areaColor});
     // Leaflet's SVG renderers draw a margin beyond the view (default 10% per side);
     // a wider margin keeps short drags from revealing undrawn polygons.
     const renderers = new Map();
     const rendererFor = pane => renderers.get(pane) || renderers.set(pane, L.svg({pane, padding: 0.5})).get(pane);
     const map = L.map('map', {zoomControl: true, scrollWheelZoom: false, fadeAnimation: false, renderer: L.svg({padding: 0.5}),
       zoomSnap: 0.25, zoomDelta: 0.5, minZoom: 6, maxZoom: 19});
+    const HoverTooltip = L.Tooltip.extend({
+      options: {sticky: true, opacity: 0.9, className: 'area-hover'},
+      _setPosition(position) {
+        const point = this._map.layerPointToContainerPoint(position);
+        const bounds = this._map.getContainer().getBoundingClientRect();
+        const box = this._container;
+        // Prefer above the pointer; flip below when the box would leave the view.
+        const above = bounds.top + point.y - Math.max(0, bounds.top) >= box.offsetHeight + 16;
+        const x = bounds.left + point.x;
+        const left = Math.max(0, bounds.left) + 8 + box.offsetWidth / 2;
+        const right = Math.min(innerWidth, bounds.right) - 8 - box.offsetWidth / 2;
+        this.options.direction = above ? 'top' : 'bottom';
+        this.options.offset = [Math.max(left, Math.min(right, x)) - x, above ? -10 : 10];
+        L.Tooltip.prototype._setPosition.call(this, position);
+      },
+    });
+    const hoverTooltip = content => new HoverTooltip().setContent(content);
     map.attributionControl.setPrefix(false);
     // Trackpad pinches zoom the map, not the page; plain wheel scrolling still drives the story.
-    // Chromium/Firefox report pinches as ctrl+wheel; Safari sends gesture events.
+    // Chromium/Firefox trackpads report ctrl+wheel; desktop Safari sends gestures.
+    // Touchscreens use Leaflet's native touch zoom, which transforms existing
+    // vectors during the pinch instead of reprojecting them on every event.
     let pinchZoom = null, pinchTimer = null, gestureZoom = null;
     const zoomAt = (event, zoom) => map.setZoomAround(map.mouseEventToContainerPoint(event),
       Math.max(map.getMinZoom(), Math.min(map.getMaxZoom(), zoom)), {animate: false});
@@ -131,9 +149,15 @@
       clearTimeout(pinchTimer);
       pinchTimer = setTimeout(() => {pinchZoom = null;}, 250);
     }, {passive: false});
-    map.getContainer().addEventListener('gesturestart', event => {event.preventDefault(); gestureZoom = map.getZoom();});
-    map.getContainer().addEventListener('gesturechange', event => {event.preventDefault(); zoomAt(event, gestureZoom + Math.log2(event.scale));});
-    map.getContainer().addEventListener('gestureend', event => {event.preventDefault(); gestureZoom = null;});
+    if (!navigator.maxTouchPoints) {
+      map.getContainer().addEventListener('gesturestart', event => {event.preventDefault(); gestureZoom = map.getZoom();});
+      map.getContainer().addEventListener('gesturechange', event => {
+        if (gestureZoom === null) return;
+        event.preventDefault();
+        zoomAt(event, gestureZoom + Math.log2(event.scale));
+      });
+      map.getContainer().addEventListener('gestureend', event => {event.preventDefault(); gestureZoom = null;});
+    }
     // Leaflet ends a drag only on mouseup, which is lost when the button is released outside
     // the map or window. Supply that mouseup once the pointer leaves the map's bounds or the
     // window, the window loses focus, or the pointer returns with no button held.
@@ -168,9 +192,7 @@
       interactive: townHover,
       style: feature => ({color: '#536c70', weight: 1, opacity: 0.85,
         fillColor: '#788992', fillOpacity: 0}),
-      onEachFeature: (feature, layer) => townHover && layer.bindTooltip(() => municipalityTooltip(feature.properties), {
-        sticky: true, opacity: 1, className: 'area-hover', direction: 'auto',
-      }),
+      onEachFeature: (feature, layer) => townHover && layer.bindTooltip(hoverTooltip(() => municipalityTooltip(feature.properties))),
     }).addTo(map);
     map.createPane('rpcBoundaries');
     map.getPane('rpcBoundaries').style.zIndex = 450;
@@ -186,9 +208,7 @@
       style: feature => ({color: areaColor(feature.properties.likely_eligible), weight: 1.2,
         opacity: 0.9, fillColor: areaColor(feature.properties.likely_eligible), fillOpacity: 0.42}),
       onEachFeature: (feature, layer) => {
-        layer.bindTooltip(() => areaTooltip(feature.properties), {
-          sticky: true, opacity: 1, className: 'area-hover', direction: 'auto',
-        });
+        layer.bindTooltip(hoverTooltip(() => areaTooltip(feature.properties)));
       }
     });
     const {positive: good, negative: bad, unknown: muted, absent} = mapColors;
@@ -200,14 +220,12 @@
       style: {color: tierColor, fillColor: tierColor, weight: 1.2, opacity: 0, fillOpacity: 0},
       onEachFeature: (feature, layer) => {
         const p = feature.properties;
-        layer.bindTooltip(() => `${placeHeading(p.municipality, p.rpc)}
-          <div class="area-hover-type">Tier 1B</div>${stageLine(p.map_stage)}`, {
-          sticky: true, opacity: 1, className: 'area-hover', direction: 'auto',
-        });
+        layer.bindTooltip(hoverTooltip(() => `${placeHeading(p.municipality, p.rpc)}
+          <div class="area-hover-type">Tier 1B</div>${stageLine(p.map_stage)}`));
       },
     });
     map.createPane('housingGrowth').style.zIndex = 441;
-    // Housing Growth Area outlines sit above their category polygons and never take hover.
+    // Housing Growth Area hover shading sits above categories and never takes hover.
     const outlinePane = map.createPane('housingOutlines');
     outlinePane.style.zIndex = 442;
     outlinePane.style.pointerEvents = 'none';
@@ -238,18 +256,18 @@
       style: {color: good, fillColor: good, weight: 1, opacity: 0, fillOpacity: 0},
       onEachFeature: (feature, layer) => {
         if (kind !== 'housing-block') {
-          layer.bindTooltip(() => housingTooltip(kind, feature.properties), {sticky: true, opacity: 1, className: 'area-hover', direction: 'auto'});
+          layer.bindTooltip(hoverTooltip(() => housingTooltip(kind, feature.properties)));
         }
       },
     })}));
-    // Mount only the overlays the active story animates; unmounted layers never take hover.
+    // Keep story collections in memory; mount their polygons only while visible.
     const storyLayers = [['area', areaLayer], ['tier', tierLayer], ...housingLayers.map(({kind, layer}) => [kind, layer])]
       .filter(([kind]) => !overlays || overlays.includes(kind));
-    storyLayers.forEach(([, layer]) => layer.addTo(map));
     // Hover tint: the hovered polygon's fill darkens slightly; over category polygons,
     // the whole Housing Growth Area (block) under the pointer is shaded instead.
     const sampledStyles = new Map();
     let tintedLayer = null;
+    let storyOrderChanged = false;
     const darken = color => /^#[0-9a-f]{6}$/i.test(color) ? '#' + color.slice(1).match(/../g)
       .map(value => Math.round(parseInt(value, 16) * 0.8).toString(16).padStart(2, '0')).join('') : color;
     const blockCollection = housingLayers.find(({kind}) => kind === 'housing-block').layer;
@@ -262,14 +280,34 @@
       : style.fillColor ? {...style, fillColor: darken(style.fillColor)} : style;
     const paint = layer => {
       const style = sampledStyles.get(layer);
-      if (style) layer.setStyle(layer === tintedLayer ? tint(layer, style) : style);
+      if (!style) return;
+      const rendered = layer === tintedLayer ? tint(layer, style) : style;
+      layer.setStyle(rendered);
+      const visible = (layer.options.stroke && layer.options.opacity > 0) ||
+        (layer.options.fill && layer.options.fillOpacity > 0);
+      if (visible && !map.hasLayer(layer)) {
+        layer.addTo(map);
+        storyOrderChanged = true;
+      } else if (!visible && map.hasLayer(layer)) {
+        layer.closeTooltip();
+        map.removeLayer(layer);
+      }
     };
+    function restoreStoryOrder() {
+      if (!storyOrderChanged) return;
+      // Re-added SVG paths otherwise sit above later layers in the same pane.
+      storyLayers.forEach(([, collection]) => collection.eachLayer(layer => {
+        if (map.hasLayer(layer) && layer.getElement()) layer.bringToFront();
+      }));
+      storyOrderChanged = false;
+    }
     function setTint(layer) {
       if (layer === tintedLayer) return;
       const previous = tintedLayer;
       tintedLayer = layer;
       if (previous) paint(previous);
       if (layer) paint(layer);
+      restoreStoryOrder();
     }
     const inRing = ([x, y], ring) => {
       let inside = false;
@@ -318,9 +356,9 @@
     initial.forEach(item => {item.style = {...item.style, ...initialStyle(item)};});
     const timeline = MapStoryAnimation.compile(initial, groups);
     let currentStep = 0, lastPosition = null;
-    // Leaflet creates path elements only once the map has a view; restyle them then
-    // so hidden polygons receive story-area-hidden and never take hover.
-    map.whenReady(() => {lastPosition = null;});
+    // Leaflet creates SVG paths only once the map has a view; apply styles and
+    // restore their order after that first view too.
+    map.whenReady(() => {lastPosition = null; storyOrderChanged = true;});
     const scrollLayout = window.matchMedia('(min-width: 1000px) and (min-height: 700px)');
     const walkthrough = document.getElementById('map-walkthrough');
     walkthrough.style.setProperty('--story-height', `${100 + (steps.length - 1) * 125}vh`);
@@ -369,6 +407,7 @@
             if (item.style.opacity === 0) item.layer.closeTooltip();
           }
         });
+        restoreStoryOrder();
         lastPosition = position;
       }
       const moving = scrollLayout.matches && !reducedMotion.matches;
@@ -521,6 +560,12 @@
     const focusOptions = document.getElementById('focus-options');
     const focusClear = document.getElementById('focus-clear');
     const focusName = feature => rpcName(feature.properties.rpc);
+    function applyFocus({layer, matches}) {
+      const element = layer.getElement();
+      if (!element) return;
+      element.classList.add('focus-overlay');
+      element.classList.toggle('focus-overlay-hidden', !!focusRpc && !matches(focusRpc));
+    }
     // Fade feature overlays independently of story fill/stroke animation and tiles.
     function selectFocus(feature, recenter = true) {
       focusRegion = feature;
@@ -528,9 +573,7 @@
       cards.forEach((card, index) => card.querySelectorAll('.story-stat strong').forEach((value, stat) => {
         value.textContent = number(countStat(steps[index], steps[index].stats[stat].select));
       }));
-      focusLayers.forEach(({layer, matches}) => {
-        layer.getElement()?.classList.toggle('focus-overlay-hidden', !!focusRpc && !matches(focusRpc));
-      });
+      focusLayers.forEach(applyFocus);
       clearHover();
       document.getElementById('focus-name').textContent = feature ? focusName(feature) : 'Vermont';
       focusControl.classList.toggle('is-active', !!feature);
@@ -595,7 +638,11 @@
     }
     new ResizeObserver(resizeStory).observe(document.getElementById('map'));
     resizeStory();
-    focusLayers.forEach(({layer}) => layer.getElement()?.classList.add('focus-overlay'));
+    // Leaflet creates a new SVG path on each add; restore focus classes then too.
+    focusLayers.forEach(item => {
+      item.layer.on('add', () => applyFocus(item));
+      applyFocus(item);
+    });
   }
   initMap();
 

@@ -24,14 +24,13 @@ window.MapStories.register({
       overlays: ['housing-category', 'housing-block', 'housing-coverage'],
       initial: item => item.kind === 'housing-category'
         ? {color: categoryColors[item.props.flu_code], fillColor: categoryColors[item.props.flu_code], opacity: 0.95, fillOpacity: 0.8}
-        : item.kind === 'housing-block' ? {color: colors.outline, weight: 2, opacity: 1, fillOpacity: 0} : {},
+        : {},
       steps: [
         {title: 'Housing Growth Areas', municipalityView: 'growth',
-          description: 'Housing Growth Areas are the places regional future land use maps designate as a Downtown Center, Village Center, Planned Growth Area, or Village Area. Each outline is one Housing Growth Area.',
+          description: 'Housing Growth Areas are the places regional future land use maps designate as a Downtown Center, Village Center, Planned Growth Area, or Village Area.',
           statsOf: 'areas', statsTitle: 'Housing Growth Areas',
           stats: [{select: () => true, label: 'Mapped Housing Growth Areas'}],
-          areaKey: [[colors.outline, 'Housing Growth Area', 'outline'],
-            [colors.villageArea, 'Village Area'], [colors.villageCenter, 'Village Center'],
+          areaKey: [[colors.villageArea, 'Village Area'], [colors.villageCenter, 'Village Center'],
             [colors.plannedGrowth, 'Planned Growth Area'], [colors.downtown, 'Downtown Center']]},
         {title: 'Municipalities with Housing Growth Areas', municipalityView: 'growth', municipalFill: true,
           description: 'Green municipalities have at least one Housing Growth Area. Red municipalities have none.',
@@ -57,8 +56,7 @@ window.MapStories.register({
         [item => item.kind === 'town' ? {fillColor: hasGrowth(item.props) ? colors.gain
             : noGrowth(item.props) ? colors.negative : colors.unknown, fillOpacity: 0.55}
           : item.kind === 'housing-category' ? {color: colors.positive, fillColor: colors.positive,
-            opacity: 0.75, fillOpacity: 0.35}
-          : item.kind === 'housing-block' ? {opacity: 0} : {}],
+            opacity: 0.75, fillOpacity: 0.35} : {}],
         [item => item.kind === 'housing-category' ? {opacity: 0, fillOpacity: 0}
           : item.kind === 'town' ? {fillOpacity: 0}
           : item.kind === 'housing-coverage' ? {color: coverageColors[item.props.coverage_kind],

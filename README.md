@@ -137,8 +137,8 @@ map navigation, hover values, and narrow layouts when changing their behavior.
 Stories are registered in `web/stories.js`, whose `active` ID chooses the published
 journey. `web/story-act181.js` preserves the original five chapters with
 `enabled: false`; `web/story-overview.js` is the active four-chapter Housing Growth
-Area comparison. It outlines each Housing Growth Area (a prepared block) over its four
-future land use categories, colors municipalities with and without them, shows their
+Area comparison. It shows the four future land use categories within Housing
+Growth Areas (prepared blocks), colors municipalities with and without them, shows their
 intersection and difference with mapped Tier 1B, then summarizes municipal Tier 1B
 coverage. Hovers report one "Submission stage" (each region's selected map stage);
 coverage colors do not imply final approval.
@@ -176,7 +176,10 @@ Transitions target shared `town`, `area`, and `tier` layers; hidden polygon
 interactions follow their sampled opacity, regardless of chapter order.
 `overlays` lists the polygon layers a story uses (`area`, `tier`,
 `housing-category`, `housing-block`, `housing-coverage`); only those are mounted on
-the map. `housing-block` outlines never take hover.
+the map while their stroke or fill is visible. Fully transparent polygons stay in
+memory but leave the map, avoiding zoom redraws; fades keep both scenes mounted
+until their opacity reaches zero. Reverse navigation restores styles, focus, and
+layer order. `housing-block` polygons appear only for hover shading and never take hover.
 To add a story, register a unique ID in a new `web/story-*.js` file and include it
 before `dashboard.js` in `analyze.py`'s script list. New polygon datasets still need
 a provenance-validated export and a layer adapter in `dashboard.js`; story files
@@ -214,7 +217,9 @@ Desktop fitting uses the map zone's actual bounds, with 32px outer margins and
 space reserved for Focus at its top center, with a downward-opening menu. The
 horizontal −/+ zoom pill sits beside Focus in a centered group with a 16px gap;
 both pills are 38px tall. Zoom changes by half a level. Trackpad pinches zoom the map rather than the page;
-plain wheel scrolling still advances the story.
+plain wheel scrolling still advances the story. Touchscreen pinches use Leaflet's
+native touch zoom; custom Safari gesture handling is reserved for devices without
+touch points so it does not compete with native pinching on iPhone/iPad.
 The vertical timeline occupies a separate right-hand strip beyond the cards;
 cards and timeline share the same vertical center at each step. A dot grows only
 once reached, and shrinks halfway into the next interval as its overlay leg starts.
